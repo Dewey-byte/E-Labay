@@ -1,0 +1,20 @@
+{
+  "name": "e-labay-tooling",
+  "private": true,
+  "description": "Firebase CLI, emulator and security-rules test tooling for E-Labay (the app itself is Flutter).",
+  "scripts": {
+    "emulators": "npm --prefix functions run build && firebase emulators:start --project demo-elabay",
+    "seed": "node tests/seed/seed-emulators.mjs",
+    "test:rules": "firebase emulators:exec --only firestore,storage --project demo-elabay \"node --test tests/rules\"",
+    "test:integration": "npm --prefix functions run build && firebase emulators:exec --only auth,firestore,functions,storage --project demo-elabay \"node --test tests/integration\"",
+    "test": "npm --prefix functions test && npm run test:rules && npm run test:integration",
+    "deploy": "firebase deploy --only firestore,storage,functions",
+    "deploy:rules": "firebase deploy --only firestore:rules,firestore:indexes,storage"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.2",
+    "firebase": "^12.12.0",
+    "firebase-admin": "^13.10.0",
+    "firebase-tools": "^15.36.0"
+  }
+}

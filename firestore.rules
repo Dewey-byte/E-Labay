@@ -1,0 +1,180 @@
+rules_version = '2';
+
+// E-Labay Firestore security rules.
+//
+// Roles come from custom auth claims set only by trusted backend code
+// (Cloud Functions / admin script): request.auth.token.role is "collector" or
+// "faculty", and Faculty accounts carry request.auth.token.officeId.
+// Points, collections, point transactions and notifications are written only
+// by Cloud Functions (Admin SDK bypasses these rules).
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- helpers ----------
+    function signedIn() {
+      return request.auth != null;
+    }
+    function isCollector() {
+      return signedIn() && request.auth.token.role == 'collector';
+    }
+    function isFaculty() {
+      return signedIn() && request.auth.token.role == 'faculty'
+        && request.auth.token.officeId is string;
+    }
+    function isOwnOffice(officeId) {
+      return isFaculty() && request.auth.token.officeId == officeId;
+    }
+    function changedKeys() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+    function isText(value, maxLength) {
+      return value is string && value.size() <= maxLength;
+    }
+    function isName(value) {
+      return value is string && value.size() >= 1 && value.size() <= 80;
+    }
+    function isTime(value) {
+      return value is string && value.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$');
+    }
+
+    // Deny anything not explicitly allowed below.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ---------- users ----------
+    match /users/{uid} {
+      allow get: if signedIn() && (request.auth.uid == uid || isCollector());
+      allow list: if isCollector();
+      // Accounts are created/deleted only by Cloud Functions or the admin script.
+      allow create, delete: if false;
+      // Users may edit only their own display fields — never role, officeId,
+      // email or isActive.
+      allow update: if signedIn() && request.auth.uid == uid
+        && changedKeys().hasOnly(['fullName', 'profileImage', 'pushEnabled', 'updatedAt'])
+        && isName(request.resource.data.fullName)
+        && (request.resource.data.profileImage == null || isText(request.resource.data.profileImage, 2048))
+        && request.resource.data.pushEnabled is bool
+        && request.resource.data.updatedAt == request.time;
+
+      match /fcmTokens/{token} {
+        allow read, delete: if signedIn() && request.auth.uid == uid;
+        allow create, update: if signedIn() && request.auth.uid == uid
+          && request.resource.data.keys().hasOnly(['token', 'platform', 'createdAt', 'updatedAt'])
+          && request.resource.data.token == token
+          && isText(request.resource.data.platform, 20);
+      }
+    }
+
+    // ---------- offices (public leaderboard data) ----------
+    match /offices/{officeId} {
+      allow read: if signedIn();
+      // Offices are created by the provisionFacultyAccount function.
+      allow create, delete: if false;
+      // Collectors may edit descriptive fields; counters/points are backend-only.
+      allow update: if isCollector()
+        && changedKeys().hasOnly(['officeName', 'building', 'description', 'updatedAt'])
+        && isName(request.resource.data.officeName)
+        && isName(request.resource.data.building)
+        && isText(request.resource.data.description, 300)
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    // ---------- schedules ----------
+    function validNewSchedule(scheduleId) {
+      let d = request.resource.data;
+      let officePath = /databases/$(database)/documents/offices/$(d.officeId);
+      return d.keys().hasAll(['scheduleId', 'officeId', 'officeName', 'collectorId',
+                              'collectionDate', 'collectionTime', 'status', 'createdAt', 'updatedAt'])
+        && d.keys().hasOnly(['scheduleId', 'officeId', 'officeName', 'building', 'collectorId',
+                             'collectorName', 'collectionDate', 'collectionTime', 'notes', 'status',
+                             'reminderSent', 'createdAt', 'updatedAt'])
+        && d.scheduleId == scheduleId
+        && d.collectorId == request.auth.uid
+        && d.officeId is string
+        && exists(officePath)
+        && d.officeName == get(officePath).data.officeName
+        && (!('building' in d) || isText(d.building, 80))
+        && (!('collectorName' in d) || isText(d.collectorName, 120))
+        && d.collectionDate is timestamp
+        && d.collectionDate > request.time - duration.value(1, 'h')
+        && isTime(d.collectionTime)
+        && (!('notes' in d) || isText(d.notes, 500))
+        && d.status == 'scheduled'
+        && (!('reminderSent' in d) || d.reminderSent == false)
+        && d.createdAt == request.time
+        && d.updatedAt == request.time;
+    }
+
+    function validScheduleUpdate() {
+      let before = resource.data;
+      let after = request.resource.data;
+      let changed = changedKeys();
+      return before.status in ['scheduled', 'upcoming', 'in_progress', 'rescheduled']
+        && changed.hasOnly(['collectionDate', 'collectionTime', 'notes', 'status', 'statusNote',
+                            'previousCollectionDate', 'reminderSent', 'cancelledAt', 'updatedAt'])
+        // "completed" is set only by submitCollectionAssessment.
+        && after.status in ['scheduled', 'upcoming', 'in_progress', 'rescheduled', 'cancelled']
+        // "upcoming" is set only by the reminder job.
+        && (after.status != 'upcoming' || before.status == 'upcoming')
+        // Moving the date always marks the schedule as rescheduled.
+        && (!changed.hasAny(['collectionDate']) || after.status == 'rescheduled')
+        && after.collectionDate is timestamp
+        && isTime(after.collectionTime)
+        && (!('notes' in after) || isText(after.notes, 500))
+        && (!('statusNote' in after) || isText(after.statusNote, 300))
+        && (after.status != 'cancelled' || (after.statusNote is string && after.statusNote.size() > 0))
+        && (!changed.hasAny(['cancelledAt']) || after.cancelledAt == request.time)
+        && (!changed.hasAny(['previousCollectionDate']) || after.previousCollectionDate is timestamp)
+        // Clients may only re-arm the reminder, never mark it as sent.
+        && (!changed.hasAny(['reminderSent']) || after.reminderSent == false)
+        && after.updatedAt == request.time;
+    }
+
+    match /schedules/{scheduleId} {
+      allow read: if isCollector() || isOwnOffice(resource.data.officeId);
+      allow create: if isCollector() && validNewSchedule(scheduleId);
+      allow update: if isCollector() && validScheduleUpdate();
+      // Schedules are cancelled, never deleted.
+      allow delete: if false;
+    }
+
+    // ---------- collections & point transactions (backend-only writes) ----------
+    match /collections/{collectionId} {
+      allow read: if isCollector() || isOwnOffice(resource.data.officeId);
+      allow write: if false;
+    }
+
+    match /point_transactions/{transactionId} {
+      allow read: if isCollector() || isOwnOffice(resource.data.officeId);
+      allow write: if false;
+    }
+
+    // ---------- notifications ----------
+    match /notifications/{notificationId} {
+      allow read: if signedIn() && resource.data.recipientId == request.auth.uid;
+      // Recipients may only mark their own notifications as read.
+      allow update: if signedIn() && resource.data.recipientId == request.auth.uid
+        && changedKeys().hasOnly(['isRead', 'readAt'])
+        && request.resource.data.isRead == true
+        && request.resource.data.readAt == request.time;
+      allow create, delete: if false;
+    }
+
+    // ---------- configuration ----------
+    match /config/{docId} {
+      allow read: if signedIn() && docId == 'scoring';
+      allow write: if isCollector() && docId == 'scoring'
+        && request.resource.data.keys().hasOnly(['properPoints', 'improperPoints', 'updatedBy', 'updatedAt'])
+        && request.resource.data.properPoints is int
+        && request.resource.data.properPoints >= 1
+        && request.resource.data.properPoints <= 100
+        && request.resource.data.improperPoints is int
+        && request.resource.data.improperPoints >= 0
+        && request.resource.data.improperPoints <= request.resource.data.properPoints
+        && request.resource.data.updatedBy == request.auth.uid
+        && request.resource.data.updatedAt == request.time;
+    }
+  }
+}

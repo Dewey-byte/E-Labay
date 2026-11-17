@@ -1,0 +1,25 @@
+{
+  "name": "e-labay-functions",
+  "private": true,
+  "description": "Trusted backend for E-Labay: assessments, points, notifications and account provisioning",
+  "main": "lib/index.js",
+  "engines": {
+    "node": "22"
+  },
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "test": "npm run build && node --test test/",
+    "serve": "npm run build && firebase emulators:start --only functions,firestore,auth,storage",
+    "deploy": "firebase deploy --only functions",
+    "logs": "firebase functions:log",
+    "create-collector": "node scripts/create-collector.js"
+  },
+  "dependencies": {
+    "firebase-admin": "^13.10.0",
+    "firebase-functions": "^7.4.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}
