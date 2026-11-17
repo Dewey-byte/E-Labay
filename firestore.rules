@@ -1,30 +1,47 @@
 rules_version = '2';
 
-// E-Labay Firestore security rules.
+// E-Labay Firestore security rules (Spark plan — no Cloud Functions required).
 //
-// Roles come from custom auth claims set only by trusted backend code
-// (Cloud Functions / admin script): request.auth.token.role is "collector" or
-// "faculty", and Faculty accounts carry request.auth.token.officeId.
-// Points, collections, point transactions and notifications are written only
-// by Cloud Functions (Admin SDK bypasses these rules).
+// These rules are the trusted backend:
+// * Roles come from users/{uid} (role, officeId, isActive). Only a Collector
+//   (or the admin bootstrap script) can create profiles; nobody can change
+//   their own role, office or active flag.
+// * A collection assessment is accepted only as one atomic write that creates
+//   the collection record and its point transaction, updates the office
+//   totals and completes the schedule. The rules recompute the score from the
+//   segregation results and config/scoring and check every total, so points
+//   cannot be forged, edited or awarded twice.
+// * Notifications are created by the Collector for accounts of the office the
+//   related schedule belongs to; recipients can only mark them as read.
+// The Admin SDK (bootstrap script, optional Blaze functions) bypasses rules.
 
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // ---------- helpers ----------
+    // ---------- identity ----------
     function signedIn() {
       return request.auth != null;
     }
+    function docPath(collection, id) {
+      return /databases/$(database)/documents/$(collection)/$(id);
+    }
+    function me() {
+      return get(docPath('users', request.auth.uid)).data;
+    }
+    function isActiveUser() {
+      return signedIn() && me().isActive == true;
+    }
     function isCollector() {
-      return signedIn() && request.auth.token.role == 'collector';
+      return isActiveUser() && me().role == 'collector';
     }
     function isFaculty() {
-      return signedIn() && request.auth.token.role == 'faculty'
-        && request.auth.token.officeId is string;
+      return isActiveUser() && me().role == 'faculty' && me().officeId is string;
     }
     function isOwnOffice(officeId) {
-      return isFaculty() && request.auth.token.officeId == officeId;
+      return isFaculty() && me().officeId == officeId;
     }
+
+    // ---------- value helpers ----------
     function changedKeys() {
       return request.resource.data.diff(resource.data).affectedKeys();
     }
@@ -37,6 +54,30 @@ service cloud.firestore {
     function isTime(value) {
       return value is string && value.matches('^([01][0-9]|2[0-3]):[0-5][0-9]$');
     }
+    function pendingStatuses() {
+      return ['scheduled', 'upcoming', 'in_progress', 'rescheduled'];
+    }
+
+    // ---------- scoring ----------
+    function categories() {
+      return ['biodegradable', 'non_biodegradable', 'recyclable', 'residual'];
+    }
+    function isResult(value) {
+      return value in ['proper', 'improper', 'not_applicable'];
+    }
+    function validResults(r) {
+      return r is map && r.keys().hasOnly(categories()) && r.keys().hasAll(categories())
+        && isResult(r.biodegradable) && isResult(r.non_biodegradable)
+        && isResult(r.recyclable) && isResult(r.residual);
+    }
+    function countOf(r, value) {
+      return (r.biodegradable == value ? 1 : 0) + (r.non_biodegradable == value ? 1 : 0)
+        + (r.recyclable == value ? 1 : 0) + (r.residual == value ? 1 : 0);
+    }
+    function validScoring(c) {
+      return c.properPoints is int && c.properPoints >= 1 && c.properPoints <= 100
+        && c.improperPoints is int && c.improperPoints >= 0 && c.improperPoints <= c.properPoints;
+    }
 
     // Deny anything not explicitly allowed below.
     match /{document=**} {
@@ -44,19 +85,44 @@ service cloud.firestore {
     }
 
     // ---------- users ----------
+    function validNewFacultyProfile(uid) {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['uid', 'fullName', 'email', 'role', 'officeId', 'profileImage',
+                               'isActive', 'pushEnabled', 'createdBy', 'createdAt', 'updatedAt'])
+        && d.uid == uid
+        && d.role == 'faculty'
+        && d.officeId is string
+        && existsAfter(docPath('offices', d.officeId))
+        && isName(d.fullName)
+        && isText(d.email, 254)
+        && d.profileImage == null
+        && d.isActive == true
+        && d.pushEnabled == true
+        && d.createdBy == request.auth.uid
+        && d.createdAt == request.time
+        && d.updatedAt == request.time;
+    }
+
     match /users/{uid} {
       allow get: if signedIn() && (request.auth.uid == uid || isCollector());
       allow list: if isCollector();
-      // Accounts are created/deleted only by Cloud Functions or the admin script.
-      allow create, delete: if false;
-      // Users may edit only their own display fields — never role, officeId,
-      // email or isActive.
-      allow update: if signedIn() && request.auth.uid == uid
-        && changedKeys().hasOnly(['fullName', 'profileImage', 'pushEnabled', 'updatedAt'])
-        && isName(request.resource.data.fullName)
-        && (request.resource.data.profileImage == null || isText(request.resource.data.profileImage, 2048))
-        && request.resource.data.pushEnabled is bool
-        && request.resource.data.updatedAt == request.time;
+      // Faculty Office accounts are created by a Collector; Collectors by the
+      // admin bootstrap script. Self-registration never gets a profile.
+      allow create: if isCollector() && validNewFacultyProfile(uid);
+      allow update: if
+        // Users edit only their own display fields.
+        (signedIn() && request.auth.uid == uid
+          && changedKeys().hasOnly(['fullName', 'profileImage', 'pushEnabled', 'updatedAt'])
+          && isName(request.resource.data.fullName)
+          && (request.resource.data.profileImage == null || isText(request.resource.data.profileImage, 2048))
+          && request.resource.data.pushEnabled is bool
+          && request.resource.data.updatedAt == request.time)
+        // Collectors activate / deactivate Faculty Office accounts.
+        || (isCollector() && resource.data.role == 'faculty'
+          && changedKeys().hasOnly(['isActive', 'updatedAt'])
+          && request.resource.data.isActive is bool
+          && request.resource.data.updatedAt == request.time);
+      allow delete: if false;
 
       match /fcmTokens/{token} {
         allow read, delete: if signedIn() && request.auth.uid == uid;
@@ -68,23 +134,75 @@ service cloud.firestore {
     }
 
     // ---------- offices (public leaderboard data) ----------
+    function validNewOffice(officeId) {
+      let d = request.resource.data;
+      return d.keys().hasOnly(['officeId', 'officeName', 'building', 'description', 'totalPoints',
+                               'totalCollections', 'totalProperSegregations', 'totalAssessments',
+                               'categoryStats', 'createdBy', 'createdAt', 'updatedAt'])
+        && d.officeId == officeId
+        && isName(d.officeName)
+        && isName(d.building)
+        && isText(d.description, 300)
+        && d.totalPoints == 0 && d.totalCollections == 0
+        && d.totalProperSegregations == 0 && d.totalAssessments == 0
+        && d.categoryStats is map && d.categoryStats.size() == 0
+        && d.createdBy == request.auth.uid
+        && d.createdAt == request.time
+        && d.updatedAt == request.time;
+    }
+
+    function categoryStatOk(before, after, results, c) {
+      let b = before.get(c, {});
+      let a = after.get(c, {});
+      return a.get('proper', 0) == b.get('proper', 0) + (results[c] == 'proper' ? 1 : 0)
+        && a.get('improper', 0) == b.get('improper', 0) + (results[c] == 'improper' ? 1 : 0);
+    }
+
+    // Office totals change only together with a brand-new collection record
+    // for this office, by exactly that collection's figures.
+    function validTotalsUpdate(officeId) {
+      let before = resource.data;
+      let after = request.resource.data;
+      let collectionPath = docPath('collections', after.lastCollectionId);
+      let c = getAfter(collectionPath).data;
+      let beforeStats = before.get('categoryStats', {});
+      return changedKeys().hasOnly(['totalPoints', 'totalCollections', 'totalProperSegregations',
+                                    'totalAssessments', 'categoryStats', 'lastCollectionAt',
+                                    'lastCollectionId', 'lastPointsAwarded', 'updatedAt'])
+        && after.lastCollectionId is string
+        && !exists(collectionPath)
+        && c.officeId == officeId
+        && after.totalPoints == before.totalPoints + c.pointsAwarded
+        && after.totalCollections == before.totalCollections + 1
+        && after.totalProperSegregations == before.totalProperSegregations + c.properCount
+        && after.totalAssessments == before.totalAssessments + c.applicableCount
+        && after.categoryStats.keys().hasOnly(categories())
+        && categoryStatOk(beforeStats, after.categoryStats, c.segregationResults, 'biodegradable')
+        && categoryStatOk(beforeStats, after.categoryStats, c.segregationResults, 'non_biodegradable')
+        && categoryStatOk(beforeStats, after.categoryStats, c.segregationResults, 'recyclable')
+        && categoryStatOk(beforeStats, after.categoryStats, c.segregationResults, 'residual')
+        && after.lastPointsAwarded == c.pointsAwarded
+        && after.lastCollectionAt == request.time
+        && after.updatedAt == request.time;
+    }
+
     match /offices/{officeId} {
-      allow read: if signedIn();
-      // Offices are created by the provisionFacultyAccount function.
-      allow create, delete: if false;
-      // Collectors may edit descriptive fields; counters/points are backend-only.
-      allow update: if isCollector()
-        && changedKeys().hasOnly(['officeName', 'building', 'description', 'updatedAt'])
-        && isName(request.resource.data.officeName)
-        && isName(request.resource.data.building)
-        && isText(request.resource.data.description, 300)
-        && request.resource.data.updatedAt == request.time;
+      allow read: if isActiveUser();
+      allow create: if isCollector() && validNewOffice(officeId);
+      allow update: if isCollector() && (
+        (changedKeys().hasOnly(['officeName', 'building', 'description', 'updatedAt'])
+          && isName(request.resource.data.officeName)
+          && isName(request.resource.data.building)
+          && isText(request.resource.data.description, 300)
+          && request.resource.data.updatedAt == request.time)
+        || validTotalsUpdate(officeId));
+      allow delete: if false;
     }
 
     // ---------- schedules ----------
     function validNewSchedule(scheduleId) {
       let d = request.resource.data;
-      let officePath = /databases/$(database)/documents/offices/$(d.officeId);
+      let officePath = docPath('offices', d.officeId);
       return d.keys().hasAll(['scheduleId', 'officeId', 'officeName', 'collectorId',
                               'collectionDate', 'collectionTime', 'status', 'createdAt', 'updatedAt'])
         && d.keys().hasOnly(['scheduleId', 'officeId', 'officeName', 'building', 'collectorId',
@@ -107,18 +225,16 @@ service cloud.firestore {
         && d.updatedAt == request.time;
     }
 
-    function validScheduleUpdate() {
+    // Edit, reschedule, cancel or start a pending schedule.
+    function validScheduleEdit() {
       let before = resource.data;
       let after = request.resource.data;
       let changed = changedKeys();
-      return before.status in ['scheduled', 'upcoming', 'in_progress', 'rescheduled']
+      return before.status in pendingStatuses()
         && changed.hasOnly(['collectionDate', 'collectionTime', 'notes', 'status', 'statusNote',
                             'previousCollectionDate', 'reminderSent', 'cancelledAt', 'updatedAt'])
-        // "completed" is set only by submitCollectionAssessment.
         && after.status in ['scheduled', 'upcoming', 'in_progress', 'rescheduled', 'cancelled']
-        // "upcoming" is set only by the reminder job.
         && (after.status != 'upcoming' || before.status == 'upcoming')
-        // Moving the date always marks the schedule as rescheduled.
         && (!changed.hasAny(['collectionDate']) || after.status == 'rescheduled')
         && after.collectionDate is timestamp
         && isTime(after.collectionTime)
@@ -127,52 +243,164 @@ service cloud.firestore {
         && (after.status != 'cancelled' || (after.statusNote is string && after.statusNote.size() > 0))
         && (!changed.hasAny(['cancelledAt']) || after.cancelledAt == request.time)
         && (!changed.hasAny(['previousCollectionDate']) || after.previousCollectionDate is timestamp)
-        // Clients may only re-arm the reminder, never mark it as sent.
         && (!changed.hasAny(['reminderSent']) || after.reminderSent == false)
+        && after.updatedAt == request.time;
+    }
+
+    // Reminder: a pending schedule due within 24 hours becomes "upcoming", once.
+    function validReminder() {
+      let after = request.resource.data;
+      return resource.data.status in ['scheduled', 'rescheduled']
+        && resource.data.get('reminderSent', false) != true
+        && resource.data.collectionDate <= request.time + duration.value(24, 'h')
+        && changedKeys().hasOnly(['status', 'reminderSent', 'reminderSentAt', 'updatedAt'])
+        && after.status == 'upcoming'
+        && after.reminderSent == true
+        && after.reminderSentAt == request.time
+        && after.updatedAt == request.time;
+    }
+
+    // Completion happens only in the same write that creates its collection.
+    function validCompletion(scheduleId) {
+      let after = request.resource.data;
+      let collectionPath = docPath('collections', scheduleId);
+      return resource.data.status in pendingStatuses()
+        && changedKeys().hasOnly(['status', 'collectionId', 'pointsAwarded', 'completedAt', 'updatedAt'])
+        && after.status == 'completed'
+        && after.collectionId == scheduleId
+        && !exists(collectionPath)
+        && existsAfter(collectionPath)
+        && after.pointsAwarded == getAfter(collectionPath).data.pointsAwarded
+        && after.completedAt == request.time
         && after.updatedAt == request.time;
     }
 
     match /schedules/{scheduleId} {
       allow read: if isCollector() || isOwnOffice(resource.data.officeId);
       allow create: if isCollector() && validNewSchedule(scheduleId);
-      allow update: if isCollector() && validScheduleUpdate();
-      // Schedules are cancelled, never deleted.
+      allow update: if isCollector()
+        && (validScheduleEdit() || validReminder() || validCompletion(scheduleId));
       allow delete: if false;
     }
 
-    // ---------- collections & point transactions (backend-only writes) ----------
+    // ---------- collections (assessments) ----------
+    function validNewCollection(collectionId) {
+      let d = request.resource.data;
+      let schedulePath = docPath('schedules', collectionId);
+      let schedule = get(schedulePath).data;
+      let scheduleAfter = getAfter(schedulePath).data;
+      let scoring = getAfter(docPath('config', 'scoring')).data;
+      let proper = countOf(d.segregationResults, 'proper');
+      let improper = countOf(d.segregationResults, 'improper');
+      return d.keys().hasOnly(['collectionId', 'scheduleId', 'officeId', 'officeName', 'collectorId',
+                               'collectorName', 'segregationResults', 'properCount', 'improperCount',
+                               'applicableCount', 'pointsAwarded', 'maxPoints', 'scoring', 'remarks',
+                               'evidenceImageUrls', 'scheduledDate', 'collectedAt', 'createdAt'])
+        && d.collectionId == collectionId
+        && d.scheduleId == collectionId
+        && schedule.status in pendingStatuses()
+        && d.officeId == schedule.officeId
+        && isText(d.officeName, 80)
+        && d.collectorId == request.auth.uid
+        && isText(d.collectorName, 120)
+        && validResults(d.segregationResults)
+        && validScoring(scoring)
+        && d.scoring == {'properPoints': scoring.properPoints, 'improperPoints': scoring.improperPoints}
+        && d.properCount == proper
+        && d.improperCount == improper
+        && d.applicableCount == proper + improper
+        && d.pointsAwarded == proper * scoring.properPoints + improper * scoring.improperPoints
+        && d.maxPoints == (proper + improper) * scoring.properPoints
+        && isText(d.remarks, 500)
+        && d.evidenceImageUrls is list && d.evidenceImageUrls.size() <= 3
+        && d.scheduledDate == schedule.collectionDate
+        && d.collectedAt == request.time
+        && d.createdAt == request.time
+        // The rest of the atomic write:
+        && scheduleAfter.status == 'completed'
+        && scheduleAfter.collectionId == collectionId
+        && existsAfter(docPath('point_transactions', 'collection_' + collectionId))
+        && getAfter(docPath('offices', d.officeId)).data.lastCollectionId == collectionId;
+    }
+
     match /collections/{collectionId} {
       allow read: if isCollector() || isOwnOffice(resource.data.officeId);
-      allow write: if false;
+      // Create-only: a second submission for the same schedule is an update and is denied.
+      allow create: if isCollector() && validNewCollection(collectionId);
+      allow update, delete: if false;
+    }
+
+    // ---------- point transactions (permanent ledger) ----------
+    function validNewTransaction(transactionId) {
+      let d = request.resource.data;
+      let collectionPath = docPath('collections', d.collectionId);
+      let c = getAfter(collectionPath).data;
+      return d.keys().hasOnly(['transactionId', 'officeId', 'officeName', 'collectionId', 'scheduleId',
+                               'pointsAwarded', 'transactionType', 'properCount', 'applicableCount',
+                               'remarks', 'collectorId', 'collectorName', 'assessmentDate', 'createdAt'])
+        && d.collectionId is string
+        && transactionId == 'collection_' + d.collectionId
+        && d.transactionId == transactionId
+        && !exists(collectionPath)
+        && existsAfter(collectionPath)
+        && d.scheduleId == d.collectionId
+        && d.officeId == c.officeId
+        && d.pointsAwarded == c.pointsAwarded
+        && d.properCount == c.properCount
+        && d.applicableCount == c.applicableCount
+        && d.remarks == c.remarks
+        && d.transactionType == 'collection_assessment'
+        && d.collectorId == request.auth.uid
+        && isText(d.officeName, 80)
+        && isText(d.collectorName, 120)
+        && d.assessmentDate == request.time
+        && d.createdAt == request.time;
     }
 
     match /point_transactions/{transactionId} {
       allow read: if isCollector() || isOwnOffice(resource.data.officeId);
-      allow write: if false;
+      allow create: if isCollector() && validNewTransaction(transactionId);
+      allow update, delete: if false;
     }
 
     // ---------- notifications ----------
+    function validNewNotification(notificationId) {
+      let d = request.resource.data;
+      let recipient = get(docPath('users', d.recipientId)).data;
+      return d.keys().hasOnly(['notificationId', 'recipientId', 'recipientRole', 'officeId', 'title',
+                               'message', 'notificationType', 'relatedId', 'isRead', 'createdAt'])
+        && d.notificationId == notificationId
+        && d.recipientRole == 'faculty'
+        && recipient.role == 'faculty'
+        && recipient.officeId == d.officeId
+        && d.relatedId is string
+        && getAfter(docPath('schedules', d.relatedId)).data.officeId == d.officeId
+        && d.notificationType in ['schedule_created', 'schedule_reminder', 'schedule_rescheduled',
+                                  'schedule_cancelled', 'schedule_updated', 'collection_completed',
+                                  'points_awarded']
+        && isText(d.title, 120) && d.title.size() > 0
+        && isText(d.message, 1000)
+        && d.isRead == false
+        && d.createdAt == request.time;
+    }
+
     match /notifications/{notificationId} {
       allow read: if signedIn() && resource.data.recipientId == request.auth.uid;
+      allow create: if isCollector() && validNewNotification(notificationId);
       // Recipients may only mark their own notifications as read.
       allow update: if signedIn() && resource.data.recipientId == request.auth.uid
         && changedKeys().hasOnly(['isRead', 'readAt'])
         && request.resource.data.isRead == true
         && request.resource.data.readAt == request.time;
-      allow create, delete: if false;
+      allow delete: if false;
     }
 
     // ---------- configuration ----------
     match /config/{docId} {
-      allow read: if signedIn() && docId == 'scoring';
-      allow write: if isCollector() && docId == 'scoring'
+      allow read: if isActiveUser() && docId == 'scoring';
+      allow create, update: if isCollector() && docId == 'scoring'
         && request.resource.data.keys().hasOnly(['properPoints', 'improperPoints', 'updatedBy', 'updatedAt'])
-        && request.resource.data.properPoints is int
-        && request.resource.data.properPoints >= 1
-        && request.resource.data.properPoints <= 100
-        && request.resource.data.improperPoints is int
-        && request.resource.data.improperPoints >= 0
-        && request.resource.data.improperPoints <= request.resource.data.properPoints
+        && validScoring(request.resource.data)
         && request.resource.data.updatedBy == request.auth.uid
         && request.resource.data.updatedAt == request.time;
     }

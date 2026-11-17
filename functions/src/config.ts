@@ -1,9 +1,6 @@
 import { defineString } from "firebase-functions/params";
 
-/**
- * Region for every function. Must match `AppConstants.functionsRegion` in
- * `lib/core/constants/app_constants.dart`.
- */
+/** Region for the optional functions (match your Firestore location). */
 export const REGION = "asia-southeast1";
 
 /** Time zone used to format dates inside notification messages. */
@@ -23,8 +20,6 @@ export const COLLECTIONS = {
   fcmTokens: "fcmTokens",
 } as const;
 
-export const SCORING_CONFIG_PATH = `${COLLECTIONS.config}/scoring`;
-
 export const ROLE = {
   collector: "collector",
   faculty: "faculty",
@@ -39,14 +34,6 @@ export const STATUS = {
   rescheduled: "rescheduled",
 } as const;
 
-/** Statuses that still await collection. */
-export const PENDING_STATUSES: string[] = [
-  STATUS.scheduled,
-  STATUS.upcoming,
-  STATUS.inProgress,
-  STATUS.rescheduled,
-];
-
 export const NOTIFICATION_TYPE = {
   scheduleCreated: "schedule_created",
   scheduleReminder: "schedule_reminder",
@@ -60,5 +47,3 @@ export const NOTIFICATION_TYPE = {
 /** Reminders go out once a pending collection is this close. */
 export const REMINDER_WINDOW_HOURS = 24;
 
-export const MAX_EVIDENCE_PHOTOS = 3;
-export const MAX_REMARKS_LENGTH = 500;

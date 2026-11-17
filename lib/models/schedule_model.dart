@@ -59,6 +59,15 @@ class Schedule {
     return collectionDate.isBefore(today);
   }
 
+  /// Status to show: a scheduled/rescheduled pickup due within 24 hours shows
+  /// as Upcoming even before the reminder has been sent.
+  ScheduleStatus get displayStatus {
+    if (status != ScheduleStatus.scheduled && status != ScheduleStatus.rescheduled) return status;
+    final now = DateTime.now();
+    final dueSoon = collectionDate.isAfter(now) && collectionDate.difference(now) <= const Duration(hours: 24);
+    return dueSoon ? ScheduleStatus.upcoming : status;
+  }
+
   bool get canBeAssessed => status.isPending;
   bool get canBeModified => status.isPending && status != ScheduleStatus.inProgress;
 

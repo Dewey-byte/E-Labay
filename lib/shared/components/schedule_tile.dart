@@ -23,7 +23,7 @@ class ScheduleTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final s = schedule;
-    final color = s.isOverdue ? AppColors.danger : s.status.color;
+    final color = s.isOverdue ? AppColors.danger : s.displayStatus.color;
     return AppCard(
       onTap: onTap,
       padding: const EdgeInsets.all(14),
@@ -93,7 +93,7 @@ class ScheduleTile extends StatelessWidget {
                 const SizedBox(height: 8),
                 Row(
                   children: [
-                    StatusChip(status: s.status, overdue: s.isOverdue),
+                    StatusChip(status: s.displayStatus, overdue: s.isOverdue),
                     if (s.pointsAwarded != null) ...[
                       const SizedBox(width: 6),
                       TagChip(

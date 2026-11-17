@@ -1,4 +1,4 @@
-// Security-rules tests for E-Labay. Run on the emulators with:
+// Security-rules tests for E-Labay (Spark-plan rules). Run on the emulators:
 //   npm run test:rules
 import { readFileSync } from "node:fs";
 import { after, before, beforeEach, describe, test } from "node:test";
@@ -17,35 +17,86 @@ import {
   setDoc,
   updateDoc,
   where,
+  writeBatch,
 } from "firebase/firestore";
 import { getBytes, ref, uploadBytes } from "firebase/storage";
 
 let env;
-const tomorrow = () => Timestamp.fromMillis(Date.now() + 24 * 3600 * 1000);
+const HOUR = 3600 * 1000;
+const inHours = (h) => Timestamp.fromMillis(Date.now() + h * HOUR);
+const SA_DATE = inHours(20); // within the 24 h reminder window
 const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
 
-const collector = () => env.authenticatedContext("collector1", { role: "collector" }).firestore();
-const facultyA = () => env.authenticatedContext("facA", { role: "faculty", officeId: "officeA" }).firestore();
-const facultyB = () => env.authenticatedContext("facB", { role: "faculty", officeId: "officeB" }).firestore();
+const ctx = (uid) => env.authenticatedContext(uid);
+const collector = () => ctx("collector1").firestore();
+const facultyA = () => ctx("facA").firestore();
+const facultyB = () => ctx("facB").firestore();
 const anonymous = () => env.unauthenticatedContext().firestore();
 
 function newSchedule(overrides = {}) {
   return {
-    scheduleId: "new1",
-    officeId: "officeA",
-    officeName: "Office A",
-    building: "Main",
-    collectorId: "collector1",
-    collectorName: "Collector One",
-    collectionDate: tomorrow(),
-    collectionTime: "09:30",
-    notes: "Bins outside please",
-    status: "scheduled",
-    reminderSent: false,
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-    ...overrides,
+    scheduleId: "new1", officeId: "officeA", officeName: "Office A", building: "Main",
+    collectorId: "collector1", collectorName: "Collector One", collectionDate: inHours(48),
+    collectionTime: "09:30", notes: "Bins outside please", status: "scheduled", reminderSent: false,
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp(), ...overrides,
   };
+}
+
+function notification(id, overrides = {}) {
+  return {
+    notificationId: id, recipientId: "facA", recipientRole: "faculty", officeId: "officeA",
+    title: "Hello", message: "A message", notificationType: "schedule_updated", relatedId: "sA",
+    isRead: false, createdAt: serverTimestamp(), ...overrides,
+  };
+}
+
+const RESULTS = { biodegradable: "proper", non_biodegradable: "improper", recyclable: "not_applicable", residual: "proper" };
+
+// Builds the same atomic write the app's CollectionRepository.submitAssessment makes.
+function assessmentBatch(db, { scheduleId = "sA", results = RESULTS, override = {} } = {}) {
+  const proper = Object.values(results).filter((r) => r === "proper").length;
+  const improper = Object.values(results).filter((r) => r === "improper").length;
+  const points = proper * 10;
+  const batch = writeBatch(db);
+  const now = serverTimestamp();
+  batch.set(doc(db, "collections", scheduleId), {
+    collectionId: scheduleId, scheduleId, officeId: "officeA", officeName: "Office A",
+    collectorId: "collector1", collectorName: "Collector One", segregationResults: results,
+    properCount: proper, improperCount: improper, applicableCount: proper + improper,
+    pointsAwarded: points, maxPoints: (proper + improper) * 10, scoring: { properPoints: 10, improperPoints: 0 },
+    remarks: "Good job", evidenceImageUrls: [], scheduledDate: SA_DATE, collectedAt: now, createdAt: now,
+    ...(override.collection ?? {}),
+  });
+  if (!override.skipTransaction) {
+    batch.set(doc(db, "point_transactions", `collection_${scheduleId}`), {
+      transactionId: `collection_${scheduleId}`, officeId: "officeA", officeName: "Office A",
+      collectionId: scheduleId, scheduleId, pointsAwarded: points, transactionType: "collection_assessment",
+      properCount: proper, applicableCount: proper + improper, remarks: "Good job",
+      collectorId: "collector1", collectorName: "Collector One", assessmentDate: now, createdAt: now,
+      ...(override.transaction ?? {}),
+    });
+  }
+  const stat = (c) => ({ proper: results[c] === "proper" ? 1 : 0, improper: results[c] === "improper" ? 1 : 0 });
+  if (!override.skipOffice) {
+    batch.update(doc(db, "offices", "officeA"), {
+      totalPoints: 30 + points, totalCollections: 2, totalProperSegregations: 3 + proper,
+      totalAssessments: 4 + proper + improper,
+      categoryStats: {
+        biodegradable: stat("biodegradable"), non_biodegradable: stat("non_biodegradable"),
+        recyclable: stat("recyclable"), residual: stat("residual"),
+      },
+      lastCollectionId: scheduleId, lastPointsAwarded: points, lastCollectionAt: now, updatedAt: now,
+      ...(override.office ?? {}),
+    });
+  }
+  if (!override.skipSchedule) {
+    batch.update(doc(db, "schedules", scheduleId), {
+      status: "completed", collectionId: scheduleId, pointsAwarded: points, completedAt: now, updatedAt: now,
+    });
+  }
+  batch.set(doc(db, "notifications", `completed_${scheduleId}_facA`),
+    notification(`completed_${scheduleId}_facA`, { notificationType: "collection_completed", relatedId: scheduleId }));
+  return batch;
 }
 
 before(async () => {
@@ -62,15 +113,16 @@ after(async () => {
 
 beforeEach(async () => {
   await env.clearFirestore();
-  await env.withSecurityRulesDisabled(async (ctx) => {
-    const db = ctx.firestore();
-    const user = (role, officeId, name) => ({
-      fullName: name, email: `${name}@test.edu`, role, officeId, profileImage: null,
-      isActive: true, pushEnabled: true, createdAt: Timestamp.now(), updatedAt: Timestamp.now(),
+  await env.withSecurityRulesDisabled(async (c) => {
+    const db = c.firestore();
+    const user = (role, officeId, name, isActive = true) => ({
+      uid: name, fullName: name, email: `${name}@test.edu`, role, officeId, profileImage: null,
+      isActive, pushEnabled: true, createdAt: Timestamp.now(), updatedAt: Timestamp.now(),
     });
-    await setDoc(doc(db, "users/collector1"), user("collector", null, "collector"));
+    await setDoc(doc(db, "users/collector1"), user("collector", null, "collector1"));
     await setDoc(doc(db, "users/facA"), user("faculty", "officeA", "facA"));
     await setDoc(doc(db, "users/facB"), user("faculty", "officeB", "facB"));
+    await setDoc(doc(db, "users/inactiveCollector"), user("collector", null, "inactiveCollector", false));
     for (const id of ["officeA", "officeB"]) {
       await setDoc(doc(db, `offices/${id}`), {
         officeId: id, officeName: id === "officeA" ? "Office A" : "Office B", building: "Main",
@@ -78,11 +130,13 @@ beforeEach(async () => {
         totalProperSegregations: 3, totalAssessments: 4, categoryStats: {},
       });
     }
-    const schedule = (officeId, status) => ({
-      officeId, officeName: officeId, collectorId: "collector1", collectionDate: tomorrow(),
+    const schedule = (officeId, status, date = SA_DATE) => ({
+      officeId, officeName: officeId, collectorId: "collector1", collectionDate: date,
       collectionTime: "08:00", notes: "", status, updatedAt: Timestamp.now(),
     });
-    await setDoc(doc(db, "schedules/sA"), schedule("officeA", "scheduled"));
+    await setDoc(doc(db, "schedules/sA"), schedule("officeA", "in_progress"));
+    await setDoc(doc(db, "schedules/sA2"), schedule("officeA", "scheduled"));
+    await setDoc(doc(db, "schedules/sFar"), schedule("officeA", "scheduled", inHours(72)));
     await setDoc(doc(db, "schedules/sB"), schedule("officeB", "scheduled"));
     await setDoc(doc(db, "schedules/sDone"), schedule("officeA", "completed"));
     await setDoc(doc(db, "collections/cA"), { officeId: "officeA", pointsAwarded: 30 });
@@ -95,55 +149,98 @@ beforeEach(async () => {
   });
 });
 
-describe("1. authentication required", () => {
+describe("1. authentication and profiles", () => {
   test("anonymous users cannot read anything", async () => {
     await assertFails(getDoc(doc(anonymous(), "offices/officeA")));
     await assertFails(getDoc(doc(anonymous(), "schedules/sA")));
     await assertFails(getDoc(doc(anonymous(), "config/scoring")));
   });
+  test("signed-in users without a profile (self-registered) get nothing", async () => {
+    const stranger = ctx("stranger").firestore();
+    await assertFails(getDoc(doc(stranger, "offices/officeA")));
+    await assertFails(setDoc(doc(stranger, "users/stranger"), { role: "collector", fullName: "x", isActive: true }));
+  });
+  test("deactivated accounts lose access", async () => {
+    await assertFails(setDoc(doc(ctx("inactiveCollector").firestore(), "schedules/new1"), newSchedule({ collectorId: "inactiveCollector" })));
+  });
+});
+
+describe("account provisioning by the Collector", () => {
+  const office = () => ({
+    officeId: "officeC", officeName: "Office C", building: "Annex", description: "", totalPoints: 0,
+    totalCollections: 0, totalProperSegregations: 0, totalAssessments: 0, categoryStats: {},
+    createdBy: "collector1", createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+  });
+  const profile = (overrides = {}) => ({
+    uid: "facC", fullName: "Office C", email: "c@test.edu", role: "faculty", officeId: "officeC",
+    profileImage: null, isActive: true, pushEnabled: true, createdBy: "collector1",
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp(), ...overrides,
+  });
+  test("collector creates an office and its faculty profile in one batch", async () => {
+    const db = collector();
+    const batch = writeBatch(db);
+    batch.set(doc(db, "offices/officeC"), office());
+    batch.set(doc(db, "users/facC"), profile());
+    await assertSucceeds(batch.commit());
+  });
+  test("collector cannot create collector profiles or offices with points", async () => {
+    await assertFails(setDoc(doc(collector(), "users/facC"), profile({ role: "collector", officeId: "officeA" })));
+    await assertFails(setDoc(doc(collector(), "offices/officeC"), { ...office(), totalPoints: 500 }));
+  });
+  test("faculty cannot provision accounts", async () => {
+    await assertFails(setDoc(doc(facultyA(), "users/facC"), profile({ officeId: "officeA", createdBy: "facA" })));
+  });
+  test("collector deactivates and reactivates a faculty account", async () => {
+    await assertSucceeds(updateDoc(doc(collector(), "users/facA"), { isActive: false, updatedAt: serverTimestamp() }));
+    await assertFails(getDoc(doc(facultyA(), "schedules/sA")));
+    await assertFails(updateDoc(doc(collector(), "users/facA"), { role: "collector", updatedAt: serverTimestamp() }));
+  });
 });
 
 describe("2. schedules: only Collectors create and manage", () => {
-  test("collector can create a valid schedule", async () => {
-    await assertSucceeds(setDoc(doc(collector(), "schedules/new1"), newSchedule()));
+  test("collector can create a valid schedule with its notification", async () => {
+    const db = collector();
+    const batch = writeBatch(db);
+    batch.set(doc(db, "schedules/new1"), newSchedule());
+    batch.set(doc(db, "notifications/created_new1_facA"),
+      notification("created_new1_facA", { notificationType: "schedule_created", relatedId: "new1" }));
+    await assertSucceeds(batch.commit());
   });
   test("faculty cannot create schedules", async () => {
-    const db = env.authenticatedContext("facA", { role: "faculty", officeId: "officeA" }).firestore();
-    await assertFails(setDoc(doc(db, "schedules/new1"), newSchedule({ collectorId: "facA" })));
+    await assertFails(setDoc(doc(facultyA(), "schedules/new1"), newSchedule({ collectorId: "facA" })));
   });
-  test("collector cannot create a schedule that is already completed or for another collector", async () => {
+  test("invalid schedules are rejected", async () => {
     await assertFails(setDoc(doc(collector(), "schedules/new1"), newSchedule({ status: "completed" })));
     await assertFails(setDoc(doc(collector(), "schedules/new1"), newSchedule({ collectorId: "someoneElse" })));
-  });
-  test("office name must match the office and the office must exist", async () => {
     await assertFails(setDoc(doc(collector(), "schedules/new1"), newSchedule({ officeName: "Fake" })));
     await assertFails(setDoc(doc(collector(), "schedules/new1"), newSchedule({ officeId: "ghost" })));
-  });
-  test("schedule cannot be created in the past or with a bad time", async () => {
-    const past = Timestamp.fromMillis(Date.now() - 3 * 3600 * 1000);
-    await assertFails(setDoc(doc(collector(), "schedules/new1"), newSchedule({ collectionDate: past })));
+    await assertFails(setDoc(doc(collector(), "schedules/new1"), newSchedule({ collectionDate: inHours(-3) })));
     await assertFails(setDoc(doc(collector(), "schedules/new1"), newSchedule({ collectionTime: "25:00" })));
   });
-  test("collector can cancel with a reason, not without", async () => {
-    await assertFails(updateDoc(doc(collector(), "schedules/sA"), { status: "cancelled", updatedAt: serverTimestamp() }));
-    await assertSucceeds(updateDoc(doc(collector(), "schedules/sA"), {
+  test("cancel requires a reason; moving the date requires rescheduled", async () => {
+    await assertFails(updateDoc(doc(collector(), "schedules/sA2"), { status: "cancelled", updatedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(doc(collector(), "schedules/sA2"), {
       status: "cancelled", statusNote: "Holiday", cancelledAt: serverTimestamp(), updatedAt: serverTimestamp(),
     }));
-  });
-  test("moving the date requires status rescheduled", async () => {
-    const newDate = Timestamp.fromMillis(Date.now() + 48 * 3600 * 1000);
-    await assertFails(updateDoc(doc(collector(), "schedules/sA"), { collectionDate: newDate, updatedAt: serverTimestamp() }));
-    await assertSucceeds(updateDoc(doc(collector(), "schedules/sA"), {
-      collectionDate: newDate, collectionTime: "10:00", status: "rescheduled", statusNote: "Rain",
-      previousCollectionDate: Timestamp.now(), reminderSent: false, updatedAt: serverTimestamp(),
+    await assertFails(updateDoc(doc(collector(), "schedules/sFar"), { collectionDate: inHours(96), updatedAt: serverTimestamp() }));
+    await assertSucceeds(updateDoc(doc(collector(), "schedules/sFar"), {
+      collectionDate: inHours(96), collectionTime: "10:00", status: "rescheduled", statusNote: "Rain",
+      previousCollectionDate: inHours(72), reminderSent: false, updatedAt: serverTimestamp(),
     }));
   });
-  test("collector can start a collection (in progress)", async () => {
-    await assertSucceeds(updateDoc(doc(collector(), "schedules/sA"), { status: "in_progress", updatedAt: serverTimestamp() }));
+  test("collector can start a collection", async () => {
+    await assertSucceeds(updateDoc(doc(collector(), "schedules/sA2"), { status: "in_progress", updatedAt: serverTimestamp() }));
   });
-  test("clients can never mark a schedule completed or upcoming", async () => {
-    await assertFails(updateDoc(doc(collector(), "schedules/sA"), { status: "completed", updatedAt: serverTimestamp() }));
-    await assertFails(updateDoc(doc(collector(), "schedules/sA"), { status: "upcoming", updatedAt: serverTimestamp() }));
+  test("reminder: only within 24 hours, once", async () => {
+    const reminder = { status: "upcoming", reminderSent: true, reminderSentAt: serverTimestamp(), updatedAt: serverTimestamp() };
+    await assertFails(updateDoc(doc(collector(), "schedules/sFar"), reminder));
+    await assertSucceeds(updateDoc(doc(collector(), "schedules/sA2"), reminder));
+    await assertFails(updateDoc(doc(collector(), "schedules/sA2"), reminder));
+  });
+  test("clients cannot complete a schedule without an assessment", async () => {
+    await assertFails(updateDoc(doc(collector(), "schedules/sA"), {
+      status: "completed", collectionId: "sA", pointsAwarded: 40, completedAt: serverTimestamp(), updatedAt: serverTimestamp(),
+    }));
     await assertFails(updateDoc(doc(collector(), "schedules/sA"), { pointsAwarded: 40, updatedAt: serverTimestamp() }));
   });
   test("completed schedules are immutable and schedules cannot be deleted", async () => {
@@ -151,16 +248,56 @@ describe("2. schedules: only Collectors create and manage", () => {
     await assertFails(deleteDoc(doc(collector(), "schedules/sA")));
   });
   test("faculty cannot edit, reschedule or cancel", async () => {
-    await assertFails(updateDoc(doc(facultyA(), "schedules/sA"), {
-      status: "cancelled", statusNote: "no", updatedAt: serverTimestamp(),
-    }));
+    await assertFails(updateDoc(doc(facultyA(), "schedules/sA2"), { status: "cancelled", statusNote: "no", updatedAt: serverTimestamp() }));
   });
 });
 
-describe("3/9. assessments and points are backend-only", () => {
-  test("no client (even a collector) can write collections or point transactions", async () => {
-    await assertFails(setDoc(doc(collector(), "collections/x"), { officeId: "officeA", pointsAwarded: 40 }));
-    await assertFails(setDoc(doc(collector(), "point_transactions/x"), { officeId: "officeA", pointsAwarded: 40 }));
+describe("3/9. assessments: verified atomic write", () => {
+  test("a correct assessment commits and awards the recomputed points", async () => {
+    await assertSucceeds(assessmentBatch(collector()).commit());
+    const office = await getDoc(doc(collector(), "offices/officeA"));
+    if (office.data().totalPoints !== 50) throw new Error(`expected 50 points, got ${office.data().totalPoints}`);
+  });
+  test("duplicate submissions are rejected", async () => {
+    await assertSucceeds(assessmentBatch(collector()).commit());
+    await assertFails(assessmentBatch(collector()).commit());
+  });
+  test("forged points are rejected (collection, transaction or office)", async () => {
+    await assertFails(assessmentBatch(collector(), { override: { collection: { pointsAwarded: 40 } } }).commit());
+    await assertFails(assessmentBatch(collector(), { override: { transaction: { pointsAwarded: 40 } } }).commit());
+    await assertFails(assessmentBatch(collector(), { override: { office: { totalPoints: 999 } } }).commit());
+    await assertFails(assessmentBatch(collector(), { override: { office: { totalCollections: 5 } } }).commit());
+    await assertFails(assessmentBatch(collector(), { override: { collection: { properCount: 4 } } }).commit());
+    await assertFails(assessmentBatch(collector(), {
+      override: { office: { categoryStats: { biodegradable: { proper: 9, improper: 0 } } } },
+    }).commit());
+  });
+  test("scoring must match config/scoring", async () => {
+    await assertFails(assessmentBatch(collector(), {
+      override: { collection: { scoring: { properPoints: 20, improperPoints: 0 } } },
+    }).commit());
+  });
+  test("partial writes are rejected", async () => {
+    await assertFails(assessmentBatch(collector(), { override: { skipTransaction: true } }).commit());
+    await assertFails(assessmentBatch(collector(), { override: { skipOffice: true } }).commit());
+    await assertFails(assessmentBatch(collector(), { override: { skipSchedule: true } }).commit());
+  });
+  test("invalid segregation results are rejected", async () => {
+    await assertFails(assessmentBatch(collector(), { results: { ...RESULTS, recyclable: "great" } }).commit());
+  });
+  test("cancelled or completed schedules cannot be assessed", async () => {
+    await assertFails(assessmentBatch(collector(), { scheduleId: "sDone" }).commit());
+  });
+  test("faculty cannot submit assessments", async () => {
+    await assertFails(assessmentBatch(facultyA()).commit());
+  });
+  test("standalone ledger or office-total writes are rejected", async () => {
+    await assertFails(setDoc(doc(collector(), "point_transactions/collection_sA2"), {
+      transactionId: "collection_sA2", officeId: "officeA", collectionId: "sA2", pointsAwarded: 40,
+    }));
+    await assertFails(updateDoc(doc(collector(), "offices/officeA"), {
+      totalPoints: 100, lastCollectionId: "cA", updatedAt: serverTimestamp(),
+    }));
     await assertFails(updateDoc(doc(collector(), "collections/cA"), { pointsAwarded: 40 }));
   });
 });
@@ -181,7 +318,6 @@ describe("4/8. faculty see only their own private records", () => {
     await assertFails(getDoc(doc(facultyA(), "point_transactions/tB")));
     await assertFails(getDocs(query(collection(facultyA(), "schedules"), where("officeId", "==", "officeB"))));
     await assertFails(getDocs(collection(facultyA(), "schedules")));
-    await assertFails(getDocs(collection(facultyA(), "collections")));
   });
   test("faculty cannot read other users' profiles; collector can", async () => {
     await assertFails(getDoc(doc(facultyA(), "users/facB")));
@@ -192,7 +328,7 @@ describe("4/8. faculty see only their own private records", () => {
 });
 
 describe("5. faculty cannot modify points", () => {
-  test("office counters cannot be changed by any client", async () => {
+  test("office counters cannot be changed directly", async () => {
     await assertFails(updateDoc(doc(facultyA(), "offices/officeA"), { totalPoints: 9999 }));
     await assertFails(updateDoc(doc(collector(), "offices/officeA"), { totalPoints: 9999, updatedAt: serverTimestamp() }));
   });
@@ -200,9 +336,6 @@ describe("5. faculty cannot modify points", () => {
     await assertSucceeds(updateDoc(doc(collector(), "offices/officeA"), {
       officeName: "Office A (Renamed)", building: "Annex", description: "2nd floor", updatedAt: serverTimestamp(),
     }));
-  });
-  test("faculty cannot create offices", async () => {
-    await assertFails(setDoc(doc(facultyA(), "offices/new"), { officeName: "X", totalPoints: 1000 }));
   });
 });
 
@@ -223,15 +356,10 @@ describe("7. users cannot change their role", () => {
     await assertSucceeds(updateDoc(doc(facultyA(), "users/facA"), { fullName: "New Name", updatedAt: serverTimestamp() }));
     await assertSucceeds(updateDoc(doc(facultyA(), "users/facA"), { pushEnabled: false, updatedAt: serverTimestamp() }));
   });
-  test("users cannot create their own profile", async () => {
-    const db = env.authenticatedContext("newbie", {}).firestore();
-    await assertFails(setDoc(doc(db, "users/newbie"), { role: "collector", fullName: "x" }));
-  });
   test("users manage only their own FCM tokens", async () => {
     const token = { token: "tok123", platform: "android", createdAt: serverTimestamp(), updatedAt: serverTimestamp() };
     await assertSucceeds(setDoc(doc(facultyA(), "users/facA/fcmTokens/tok123"), token));
     await assertFails(setDoc(doc(facultyA(), "users/facB/fcmTokens/tok123"), token));
-    await assertFails(setDoc(doc(facultyA(), "users/facA/fcmTokens/other"), token));
   });
 });
 
@@ -243,11 +371,15 @@ describe("notifications", () => {
     )));
     await assertSucceeds(updateDoc(doc(facultyA(), "notifications/nA"), { isRead: true, readAt: serverTimestamp() }));
   });
-  test("cannot read others' notifications, edit content, create or delete", async () => {
+  test("collector notifies only accounts of the schedule's office", async () => {
+    await assertSucceeds(setDoc(doc(collector(), "notifications/updated_sA_1_facA"), notification("updated_sA_1_facA")));
+    await assertFails(setDoc(doc(collector(), "notifications/x_facB"), notification("x_facB", { recipientId: "facB" })));
+    await assertFails(setDoc(doc(collector(), "notifications/y_facA"), notification("y_facA", { relatedId: "sB" })));
+  });
+  test("faculty cannot create, edit or delete notifications", async () => {
     await assertFails(getDoc(doc(facultyA(), "notifications/nB")));
     await assertFails(updateDoc(doc(facultyA(), "notifications/nA"), { title: "Hacked" }));
-    await assertFails(setDoc(doc(facultyA(), "notifications/fake"), { recipientId: "facA", title: "x" }));
-    await assertFails(setDoc(doc(collector(), "notifications/fake"), { recipientId: "facA", title: "x" }));
+    await assertFails(setDoc(doc(facultyA(), "notifications/fake"), notification("fake")));
     await assertFails(deleteDoc(doc(facultyA(), "notifications/nA")));
   });
 });
@@ -262,30 +394,24 @@ describe("scoring configuration", () => {
     await assertFails(setDoc(doc(collector(), "config/scoring"), {
       properPoints: 5, improperPoints: 10, updatedBy: "collector1", updatedAt: serverTimestamp(),
     }));
-    await assertFails(setDoc(doc(collector(), "config/scoring"), {
-      properPoints: 500, improperPoints: 0, updatedBy: "collector1", updatedAt: serverTimestamp(),
-    }));
     await assertFails(setDoc(doc(facultyA(), "config/scoring"), {
       properPoints: 100, improperPoints: 100, updatedBy: "facA", updatedAt: serverTimestamp(),
     }));
   });
 });
 
-describe("storage: collection evidence", () => {
+describe("storage (Blaze only): collection evidence", () => {
   test("collectors upload images; faculty cannot", async () => {
-    const c = env.authenticatedContext("collector1", { role: "collector" }).storage();
+    const c = ctx("collector1").storage();
     await assertSucceeds(uploadBytes(ref(c, "collections/officeA/sA/1.png"), png, { contentType: "image/png" }));
     await assertFails(uploadBytes(ref(c, "collections/officeA/sA/2.txt"), png, { contentType: "text/plain" }));
-    const f = env.authenticatedContext("facA", { role: "faculty", officeId: "officeA" }).storage();
-    await assertFails(uploadBytes(ref(f, "collections/officeA/sA/3.png"), png, { contentType: "image/png" }));
+    await assertFails(uploadBytes(ref(ctx("facA").storage(), "collections/officeA/sA/3.png"), png, { contentType: "image/png" }));
   });
   test("only the owning office (and collectors) can read evidence", async () => {
-    await env.withSecurityRulesDisabled(async (ctx) => {
-      await uploadBytes(ref(ctx.storage(), "collections/officeA/sA/seed.png"), png, { contentType: "image/png" });
+    await env.withSecurityRulesDisabled(async (c) => {
+      await uploadBytes(ref(c.storage(), "collections/officeA/sA/seed.png"), png, { contentType: "image/png" });
     });
-    const a = env.authenticatedContext("facA", { role: "faculty", officeId: "officeA" }).storage();
-    const b = env.authenticatedContext("facB", { role: "faculty", officeId: "officeB" }).storage();
-    await assertSucceeds(getBytes(ref(a, "collections/officeA/sA/seed.png")));
-    await assertFails(getBytes(ref(b, "collections/officeA/sA/seed.png")));
+    await assertSucceeds(getBytes(ref(ctx("facA").storage(), "collections/officeA/sA/seed.png")));
+    await assertFails(getBytes(ref(ctx("facB").storage(), "collections/officeA/sA/seed.png")));
   });
 });

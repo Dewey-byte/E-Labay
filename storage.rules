@@ -1,25 +1,33 @@
 rules_version = '2';
 
-// E-Labay Cloud Storage security rules.
+// E-Labay Cloud Storage rules. Storage is optional and needs the Blaze plan
+// (evidence photos and profile pictures). Roles are read from Firestore
+// users/{uid} (cross-service rules).
 service firebase.storage {
   match /b/{bucket}/o {
 
+    function profile() {
+      return firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data;
+    }
     function signedIn() {
       return request.auth != null;
     }
     function isCollector() {
-      return signedIn() && request.auth.token.role == 'collector';
+      return signedIn() && profile().role == 'collector' && profile().isActive == true;
+    }
+    function isOfficeMember(officeId) {
+      return signedIn() && profile().role == 'faculty' && profile().isActive == true
+        && profile().officeId == officeId;
     }
     function isImageUnder(megabytes) {
       return request.resource.size < megabytes * 1024 * 1024
         && request.resource.contentType.matches('image/.*');
     }
 
-    // Collection evidence photos: uploaded by Collectors, visible to Collectors
-    // and to the office the collection belongs to. Evidence is immutable.
+    // Collection evidence: uploaded by Collectors, visible to Collectors and
+    // the office it belongs to. Immutable.
     match /collections/{officeId}/{scheduleId}/{fileName} {
-      allow read: if isCollector()
-        || (signedIn() && request.auth.token.officeId == officeId);
+      allow read: if isCollector() || isOfficeMember(officeId);
       allow create: if isCollector() && isImageUnder(5);
       allow update, delete: if false;
     }

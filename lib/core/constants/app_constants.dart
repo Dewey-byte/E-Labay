@@ -1,16 +1,12 @@
 /// App-wide constants shared by the UI, repositories and services.
 ///
-/// Keep the Firestore collection names and Cloud Function names in sync with
+/// Keep the Firestore collection names in sync with `firestore.rules` and
 /// `functions/src/config.ts`.
 class AppConstants {
   AppConstants._();
 
   static const appName = 'E-Labay';
   static const appTagline = 'Campus Waste Management & Collection Tracking';
-
-  /// Region the Cloud Functions are deployed to. Must match `REGION` in
-  /// `functions/src/config.ts`.
-  static const functionsRegion = 'asia-southeast1';
 
   /// Default page size for paginated history lists.
   static const pageSize = 20;
@@ -38,15 +34,6 @@ class FirestoreCollections {
 
   /// Document id inside [config] that holds the scoring rules.
   static const scoringConfigDoc = 'scoring';
-}
-
-class CloudFunctionNames {
-  CloudFunctionNames._();
-
-  static const provisionFacultyAccount = 'provisionFacultyAccount';
-  static const setAccountStatus = 'setAccountStatus';
-  static const submitCollectionAssessment = 'submitCollectionAssessment';
-  static const recalculateLeaderboard = 'recalculateLeaderboard';
 }
 
 class StoragePaths {

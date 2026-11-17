@@ -1,7 +1,7 @@
 {
   "name": "e-labay-functions",
   "private": true,
-  "description": "Trusted backend for E-Labay: assessments, points, notifications and account provisioning",
+  "description": "Optional E-Labay Cloud Functions for the Blaze plan: FCM push delivery and scheduled reminders",
   "main": "lib/index.js",
   "engines": {
     "node": "22"
@@ -9,7 +9,6 @@
   "scripts": {
     "build": "tsc",
     "build:watch": "tsc --watch",
-    "test": "npm run build && node --test test/",
     "serve": "npm run build && firebase emulators:start --only functions,firestore,auth,storage",
     "deploy": "firebase deploy --only functions",
     "logs": "firebase functions:log",

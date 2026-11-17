@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "252932925612",
+    "project_id": "e-labay",
+    "storage_bucket": "e-labay.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:252932925612:android:cf694a2e9b3154a2ddd709",
+        "android_client_info": {
+          "package_name": "ph.edu.elabay.e_labay"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCJg5Gm7xDWst1QOe_aTxa8jT25YdJwTdQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -10,9 +10,10 @@
  *      gcloud auth application-default login
  *      node scripts/create-collector.js --project <project-id> --email collector@school.edu --name "Juan Dela Cruz"
  *
- * It assigns the `collector` custom claim, writes `users/{uid}` and seeds
- * `config/scoring` with the default point values if it does not exist.
- * No service-account key is stored in the repository or the app.
+ * It writes `users/{uid}` with role "collector" (security rules read roles
+ * from there) and seeds `config/scoring` with the default point values if it
+ * does not exist. Works on the free Spark plan. No service-account key is
+ * stored in the repository or the app.
  */
 const { initializeApp, applicationDefault } = require("firebase-admin/app");
 const { getAuth } = require("firebase-admin/auth");
@@ -42,7 +43,6 @@ async function main() {
     process.exit(1);
   }
 
-  await auth.setCustomUserClaims(user.uid, { role: "collector", officeId: null });
   await db.collection("users").doc(user.uid).set(
     {
       uid: user.uid,

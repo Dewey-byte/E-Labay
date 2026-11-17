@@ -7,12 +7,14 @@ import 'package:image_picker/image_picker.dart';
 
 import '../../core/exceptions/app_exception.dart';
 import '../../core/constants/app_constants.dart';
+import '../../core/services/feature_flags.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/utils/formatters.dart';
 import '../../core/utils/scoring.dart';
 import '../../models/enums.dart';
 import '../../models/schedule_model.dart';
 import '../../models/scoring_config.dart';
+import '../../providers/auth_provider.dart';
 import '../../providers/points_provider.dart';
 import '../../providers/schedule_provider.dart';
 import '../../repositories/collection_repository.dart';
@@ -45,7 +47,10 @@ class _AssessmentScreenState extends ConsumerState<AssessmentScreen> {
     return schedule.when(
       skipLoadingOnReload: true,
       loading: () => const Scaffold(body: LoadingView()),
-      error: (e, _) => Scaffold(appBar: AppBar(), body: ErrorState(message: AppException.messageOf(e))),
+      error: (e, _) => Scaffold(
+        appBar: AppBar(),
+        body: ErrorState(message: AppException.messageOf(e)),
+      ),
       data: (s) {
         if (s == null) {
           return Scaffold(
@@ -65,7 +70,8 @@ class _AssessmentScreenState extends ConsumerState<AssessmentScreen> {
                   ? null
                   : FilledButton(
                       style: FilledButton.styleFrom(minimumSize: const Size(200, 48)),
-                      onPressed: () => context.pushReplacement(AppRoutes.collectorCollection(s.collectionId!)),
+                      onPressed: () =>
+                          context.pushReplacement(AppRoutes.collectorCollection(s.collectionId!)),
                       child: const Text('View assessment'),
                     ),
             ),
@@ -173,8 +179,11 @@ class _AssessmentFormState extends ConsumerState<_AssessmentForm> {
         );
         if (mounted) setState(() => _progressLabel = 'Submitting assessment…');
       }
+      final collector = ref.read(currentUserProvider);
+      if (collector == null) return;
       await repo.submitAssessment(
         scheduleId: widget.schedule.scheduleId,
+        collector: collector,
         results: Map.of(_results),
         remarks: _remarks.text,
         evidenceImageUrls: urls,
@@ -244,56 +253,63 @@ class _AssessmentFormState extends ConsumerState<_AssessmentForm> {
                   hintText: 'Feedback for the office, e.g. "Recyclables mixed with food waste."',
                 ),
               ),
-              SectionHeader(
-                title: 'Collection evidence (optional)',
-                actionLabel: _photos.length < AppConstants.maxEvidencePhotos ? 'Add photo' : null,
-                onAction: _addPhoto,
-              ),
-              if (_photos.isEmpty)
-                AppCard(
-                  onTap: _addPhoto,
-                  child: Row(
-                    children: [
-                      const Icon(Icons.add_a_photo_outlined, color: AppColors.forestGreen),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Text(
-                          'Attach up to ${AppConstants.maxEvidencePhotos} photos of the collected waste.',
-                          style: theme.textTheme.bodySmall,
-                        ),
-                      ),
-                    ],
-                  ),
-                )
-              else
-                SizedBox(
-                  height: 100,
-                  child: ListView.separated(
-                    scrollDirection: Axis.horizontal,
-                    itemCount: _photos.length,
-                    separatorBuilder: (_, _) => const SizedBox(width: 10),
-                    itemBuilder: (context, i) => Stack(
+              if (FeatureFlags.photoUploads) ...[
+                SectionHeader(
+                  title: 'Collection evidence (optional)',
+                  actionLabel: _photos.length < AppConstants.maxEvidencePhotos ? 'Add photo' : null,
+                  onAction: _addPhoto,
+                ),
+                if (_photos.isEmpty)
+                  AppCard(
+                    onTap: _addPhoto,
+                    child: Row(
                       children: [
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(12),
-                          child: Image.file(File(_photos[i].path), width: 100, height: 100, fit: BoxFit.cover),
-                        ),
-                        Positioned(
-                          top: 4,
-                          right: 4,
-                          child: InkWell(
-                            onTap: () => setState(() => _photos.removeAt(i)),
-                            child: const CircleAvatar(
-                              radius: 13,
-                              backgroundColor: Colors.black54,
-                              child: Icon(Icons.close, size: 16, color: Colors.white),
-                            ),
+                        const Icon(Icons.add_a_photo_outlined, color: AppColors.forestGreen),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            'Attach up to ${AppConstants.maxEvidencePhotos} photos of the collected waste.',
+                            style: theme.textTheme.bodySmall,
                           ),
                         ),
                       ],
                     ),
+                  )
+                else
+                  SizedBox(
+                    height: 100,
+                    child: ListView.separated(
+                      scrollDirection: Axis.horizontal,
+                      itemCount: _photos.length,
+                      separatorBuilder: (_, _) => const SizedBox(width: 10),
+                      itemBuilder: (context, i) => Stack(
+                        children: [
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(12),
+                            child: Image.file(
+                              File(_photos[i].path),
+                              width: 100,
+                              height: 100,
+                              fit: BoxFit.cover,
+                            ),
+                          ),
+                          Positioned(
+                            top: 4,
+                            right: 4,
+                            child: InkWell(
+                              onTap: () => setState(() => _photos.removeAt(i)),
+                              child: const CircleAvatar(
+                                radius: 13,
+                                backgroundColor: Colors.black54,
+                                child: Icon(Icons.close, size: 16, color: Colors.white),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
-                ),
+              ],
             ],
           ),
         ),
@@ -374,16 +390,18 @@ class _CategoryCard extends StatelessWidget {
   final bool showError;
 
   String _pointsLabel(SegregationResult r) => switch (r) {
-        SegregationResult.proper => '+${config.properPoints}',
-        SegregationResult.improper => config.improperPoints == 0 ? '0' : '+${config.improperPoints}',
-        SegregationResult.notApplicable => 'excluded',
-      };
+    SegregationResult.proper => '+${config.properPoints}',
+    SegregationResult.improper => config.improperPoints == 0 ? '0' : '+${config.improperPoints}',
+    SegregationResult.notApplicable => 'excluded',
+  };
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     return AppCard(
-      borderColor: showError ? AppColors.danger : (selected != null ? AppColors.tint(selected!.color, 0.5) : null),
+      borderColor: showError
+          ? AppColors.danger
+          : (selected != null ? AppColors.tint(selected!.color, 0.5) : null),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -470,10 +488,7 @@ class _OptionButton extends StatelessWidget {
               ),
               Text(
                 points,
-                style: TextStyle(
-                  color: selected ? Colors.white70 : AppColors.textMuted,
-                  fontSize: 11,
-                ),
+                style: TextStyle(color: selected ? Colors.white70 : AppColors.textMuted, fontSize: 11),
               ),
             ],
           ),
@@ -544,7 +559,10 @@ class _ReviewSheet extends StatelessWidget {
               Text(remarks),
             ],
             const SizedBox(height: 8),
-            Text('$photoCount evidence photo${photoCount == 1 ? '' : 's'} attached', style: theme.textTheme.bodySmall),
+            Text(
+              '$photoCount evidence photo${photoCount == 1 ? '' : 's'} attached',
+              style: theme.textTheme.bodySmall,
+            ),
             const SizedBox(height: 16),
             Container(
               padding: const EdgeInsets.all(12),

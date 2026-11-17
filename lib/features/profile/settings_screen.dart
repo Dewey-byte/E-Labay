@@ -10,13 +10,12 @@ import '../../providers/auth_provider.dart';
 import '../../providers/points_provider.dart';
 import '../../repositories/auth_repository.dart';
 import '../../repositories/config_repository.dart';
-import '../../repositories/leaderboard_repository.dart';
 import '../../shared/widgets/app_card.dart';
 import '../../shared/widgets/dialogs.dart';
 import '../../shared/widgets/section_header.dart';
 
-/// Settings for both roles. Collectors manage scoring rules and leaderboard
-/// maintenance; Faculty Offices manage push notifications.
+/// Settings for both roles. Collectors manage the scoring rules; Faculty
+/// Offices manage push notifications.
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
 
@@ -32,8 +31,6 @@ class SettingsScreen extends ConsumerWidget {
           if (user.isCollector) ...[
             const SectionHeader(title: 'Scoring rules'),
             const _ScoringCard(),
-            const SectionHeader(title: 'Maintenance'),
-            const _RecalculateCard(),
           ] else ...[
             const SectionHeader(title: 'Notifications'),
             _PushCard(user: user),
@@ -277,53 +274,6 @@ class _ScoringDialogState extends State<_ScoringDialog> {
           child: const Text('Save'),
         ),
       ],
-    );
-  }
-}
-
-class _RecalculateCard extends ConsumerStatefulWidget {
-  const _RecalculateCard();
-
-  @override
-  ConsumerState<_RecalculateCard> createState() => _RecalculateCardState();
-}
-
-class _RecalculateCardState extends ConsumerState<_RecalculateCard> {
-  bool _running = false;
-
-  Future<void> _run() async {
-    final ok = await showConfirmDialog(
-      context,
-      title: 'Recalculate leaderboard?',
-      message: 'Every office total is recomputed on the server from the permanent point '
-          'transaction ledger and collection records.',
-      confirmLabel: 'Recalculate',
-    );
-    if (!ok) return;
-    setState(() => _running = true);
-    try {
-      final count = await ref.read(leaderboardRepositoryProvider).recalculate();
-      if (mounted) showSuccessSnack(context, 'Totals verified for $count offices');
-    } catch (e) {
-      if (mounted) showErrorSnack(context, e);
-    } finally {
-      if (mounted) setState(() => _running = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AppCard(
-      padding: EdgeInsets.zero,
-      child: ListTile(
-        leading: const Icon(Icons.sync),
-        title: const Text('Recalculate leaderboard totals'),
-        subtitle: const Text('Verify office points against the transaction ledger'),
-        trailing: _running
-            ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
-            : const Icon(Icons.chevron_right),
-        onTap: _running ? null : _run,
-      ),
     );
   }
 }

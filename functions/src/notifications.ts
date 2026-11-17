@@ -39,7 +39,8 @@ function notificationData(recipientId: string, officeId: string, payload: Notifi
 }
 
 /**
- * Writes one notification per recipient inside a transaction. Notification
+ * Writes one notification per recipient inside a transaction, in the same
+ * shape the app writes (see NotificationRepository.addNotices). Notification
  * ids are deterministic (`{key}_{uid}`), so retries never duplicate them.
  */
 export function createNotificationsInTransaction(
@@ -55,25 +56,6 @@ export function createNotificationsInTransaction(
   }
 }
 
-/**
- * Notifies all accounts of an office outside a transaction (Firestore
- * triggers). `key` should be the trigger's event id so redelivered events are
- * idempotent.
- */
-export async function notifyOffice(officeId: string, key: string, payload: NotificationPayload): Promise<void> {
-  const recipients = await officeRecipients(officeId);
-  await Promise.all(
-    recipients.map(async (uid) => {
-      const id = `${key}_${uid}`;
-      try {
-        await db.collection(COLLECTIONS.notifications).doc(id).create(notificationData(uid, officeId, payload, id));
-      } catch (e) {
-        // ALREADY_EXISTS (6): the event was redelivered; nothing to do.
-        if ((e as { code?: number }).code !== 6) throw e;
-      }
-    }),
-  );
-}
 
 export function formatDateTime(date: Date): string {
   return new Intl.DateTimeFormat("en-US", {

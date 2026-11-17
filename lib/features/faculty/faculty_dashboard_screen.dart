@@ -274,10 +274,10 @@ class _NextCollectionCard extends StatelessWidget {
               Container(
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
-                  color: AppColors.tint(s.status.color),
+                  color: AppColors.tint(s.displayStatus.color),
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: Icon(Icons.local_shipping_outlined, color: s.status.color),
+                child: Icon(Icons.local_shipping_outlined, color: s.displayStatus.color),
               ),
               const SizedBox(width: 12),
               Expanded(
@@ -289,7 +289,7 @@ class _NextCollectionCard extends StatelessWidget {
                   ],
                 ),
               ),
-              StatusChip(status: s.status, overdue: s.isOverdue),
+              StatusChip(status: s.displayStatus, overdue: s.isOverdue),
             ],
           ),
           if (s.notes.isNotEmpty) ...[

@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:image_picker/image_picker.dart';
 
+import '../../core/services/feature_flags.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/utils/validators.dart';
 import '../../models/user_model.dart';
@@ -29,11 +30,7 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
   bool _uploading = false;
 
   Future<void> _changePhoto(AppUser user) async {
-    final file = await ImagePicker().pickImage(
-      source: ImageSource.gallery,
-      maxWidth: 600,
-      imageQuality: 75,
-    );
+    final file = await ImagePicker().pickImage(source: ImageSource.gallery, maxWidth: 600, imageQuality: 75);
     if (file == null) return;
     setState(() => _uploading = true);
     try {
@@ -123,28 +120,29 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                 Stack(
                   children: [
                     InitialsAvatar(name: user.displayName, imageUrl: user.profileImage, size: 88),
-                    Positioned(
-                      right: 0,
-                      bottom: 0,
-                      child: Material(
-                        color: AppColors.forestGreen,
-                        shape: const CircleBorder(),
-                        child: InkWell(
-                          customBorder: const CircleBorder(),
-                          onTap: _uploading ? null : () => _changePhoto(user),
-                          child: Padding(
-                            padding: const EdgeInsets.all(7),
-                            child: _uploading
-                                ? const SizedBox(
-                                    width: 16,
-                                    height: 16,
-                                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                                  )
-                                : const Icon(Icons.camera_alt_outlined, size: 16, color: Colors.white),
+                    if (FeatureFlags.photoUploads)
+                      Positioned(
+                        right: 0,
+                        bottom: 0,
+                        child: Material(
+                          color: AppColors.forestGreen,
+                          shape: const CircleBorder(),
+                          child: InkWell(
+                            customBorder: const CircleBorder(),
+                            onTap: _uploading ? null : () => _changePhoto(user),
+                            child: Padding(
+                              padding: const EdgeInsets.all(7),
+                              child: _uploading
+                                  ? const SizedBox(
+                                      width: 16,
+                                      height: 16,
+                                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                                    )
+                                  : const Icon(Icons.camera_alt_outlined, size: 16, color: Colors.white),
+                            ),
                           ),
                         ),
                       ),
-                    ),
                   ],
                 ),
                 const SizedBox(height: 14),
@@ -171,7 +169,8 @@ class _ProfileScreenState extends ConsumerState<ProfileScreen> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(office.officeName, style: theme.textTheme.titleSmall),
-                        if (office.building.isNotEmpty) Text(office.building, style: theme.textTheme.bodySmall),
+                        if (office.building.isNotEmpty)
+                          Text(office.building, style: theme.textTheme.bodySmall),
                       ],
                     ),
                   ),
@@ -265,10 +264,9 @@ class _ChangePasswordSheetState extends ConsumerState<_ChangePasswordSheet> {
       _error = null;
     });
     try {
-      await ref.read(authRepositoryProvider).changePassword(
-            currentPassword: _current.text,
-            newPassword: _new.text,
-          );
+      await ref
+          .read(authRepositoryProvider)
+          .changePassword(currentPassword: _current.text, newPassword: _new.text);
       if (mounted) Navigator.of(context).pop(true);
     } catch (e) {
       if (mounted) setState(() => _error = e.toString());

@@ -64,7 +64,7 @@ class _Body extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final s = schedule;
-    final color = s.isOverdue ? AppColors.danger : s.status.color;
+    final color = s.isOverdue ? AppColors.danger : s.displayStatus.color;
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
       children: [
@@ -74,7 +74,7 @@ class _Body extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              StatusChip(status: s.status, overdue: s.isOverdue),
+              StatusChip(status: s.displayStatus, overdue: s.isOverdue),
               const SizedBox(height: 12),
               Text(Fmt.dayLabel(s.collectionDate), style: theme.textTheme.headlineSmall),
               Text(
@@ -303,7 +303,7 @@ class _CollectorMenu extends ConsumerWidget {
     );
     if (reason == null || !context.mounted) return;
     try {
-      await ref.read(scheduleRepositoryProvider).cancel(schedule.scheduleId, reason: reason);
+      await ref.read(scheduleRepositoryProvider).cancel(schedule, reason: reason);
       if (context.mounted) showSuccessSnack(context, 'Collection cancelled');
     } catch (e) {
       if (context.mounted) showErrorSnack(context, e);

@@ -1,14 +1,36 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-/// Bottom navigation for the Collector role.
-class CollectorShell extends StatelessWidget {
+import '../../repositories/schedule_repository.dart';
+
+/// Bottom navigation for the Collector role. On open it sends any due
+/// collection reminders (pickups within 24 hours), since the Spark plan has
+/// no scheduled server jobs.
+class CollectorShell extends ConsumerStatefulWidget {
   const CollectorShell({super.key, required this.navigationShell});
 
   final StatefulNavigationShell navigationShell;
 
   @override
+  ConsumerState<CollectorShell> createState() => _CollectorShellState();
+}
+
+class _CollectorShellState extends ConsumerState<CollectorShell> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(scheduleRepositoryProvider).sendDueReminders().then(
+        (sent) => debugPrint('Collection reminders sent: $sent'),
+        onError: (Object e) => debugPrint('Reminder check failed: $e'),
+      );
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final navigationShell = widget.navigationShell;
     return Scaffold(
       body: navigationShell,
       bottomNavigationBar: NavigationBar(

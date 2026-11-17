@@ -5,10 +5,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/constants/app_constants.dart';
 import '../core/exceptions/app_exception.dart';
 import '../core/services/firebase_providers.dart';
+import '../core/utils/formatters.dart';
 import '../models/enums.dart';
 import '../models/office_model.dart';
 import '../models/schedule_model.dart';
 import '../models/user_model.dart';
+import 'notification_repository.dart';
 
 /// Filter + paging parameters for schedule lists. Value-equal so it can be
 /// used as a Riverpod family argument.
@@ -80,12 +82,13 @@ class ScheduleCounts {
   final int today;
 }
 
-/// Collection schedules. Only Collectors may write (enforced by rules);
-/// transitions to `completed` and `upcoming` happen in Cloud Functions.
+/// Collection schedules. Only Collectors may write (enforced by security
+/// rules). Every change and its office notifications commit atomically.
 class ScheduleRepository {
-  ScheduleRepository(this._db);
+  ScheduleRepository(this._db, this._notices);
 
   final FirebaseFirestore _db;
+  final NotificationRepository _notices;
 
   CollectionReference<Map<String, dynamic>> get _schedules =>
       _db.collection(FirestoreCollections.schedules);
@@ -173,6 +176,12 @@ class ScheduleRepository {
     );
   }
 
+  String _when(DateTime d) => '${Fmt.date(d)} at ${Fmt.time(d)}';
+
+  String _withNotes(String message, String notes) =>
+      notes.trim().isEmpty ? message : '$message Instructions: ${notes.trim()}';
+
+  /// Creates a schedule and notifies the office in the same atomic write.
   Future<String> createSchedule({
     required Office office,
     required AppUser collector,
@@ -181,8 +190,10 @@ class ScheduleRepository {
     required String notes,
   }) async {
     try {
+      final recipients = await _notices.officeRecipients(office.officeId);
       final doc = _schedules.doc();
-      await doc.set({
+      final batch = _db.batch();
+      batch.set(doc, {
         'scheduleId': doc.id,
         'officeId': office.officeId,
         'officeName': office.officeName,
@@ -197,6 +208,19 @@ class ScheduleRepository {
         'createdAt': FieldValue.serverTimestamp(),
         'updatedAt': FieldValue.serverTimestamp(),
       });
+      _notices.addNotices(
+        batch.set,
+        recipients: recipients,
+        officeId: office.officeId,
+        notice: OfficeNotice(
+          key: 'created_${doc.id}',
+          type: NotificationType.scheduleCreated,
+          title: 'New garbage collection scheduled',
+          message: _withNotes('A garbage collection is scheduled for ${_when(collectionDate)}.', notes),
+          scheduleId: doc.id,
+        ),
+      );
+      await batch.commit();
       return doc.id;
     } catch (e) {
       throw AppException.from(e);
@@ -205,7 +229,7 @@ class ScheduleRepository {
 
   /// Edits a pending schedule. The office cannot change (cancel and create a
   /// new schedule instead). Changing the date/time marks it `rescheduled`
-  /// (and re-arms the reminder); the Cloud Function notifies the office.
+  /// and re-arms the reminder. The office is notified of the change.
   Future<void> updateSchedule(
     Schedule current, {
     required DateTime collectionDate,
@@ -213,8 +237,11 @@ class ScheduleRepository {
     required String notes,
   }) async {
     final dateChanged = !collectionDate.isAtSameMomentAs(current.collectionDate);
+    final notesChanged = notes.trim() != current.notes.trim();
     try {
-      await _schedules.doc(current.scheduleId).update({
+      final recipients = await _notices.officeRecipients(current.officeId);
+      final batch = _db.batch();
+      batch.update(_schedules.doc(current.scheduleId), {
         'collectionDate': Timestamp.fromDate(collectionDate),
         'collectionTime': collectionTime,
         'notes': notes.trim(),
@@ -225,6 +252,41 @@ class ScheduleRepository {
         },
         'updatedAt': FieldValue.serverTimestamp(),
       });
+      final stamp = DateTime.now().millisecondsSinceEpoch;
+      if (dateChanged) {
+        _notices.addNotices(
+          batch.set,
+          recipients: recipients,
+          officeId: current.officeId,
+          notice: OfficeNotice(
+            key: 'rescheduled_${current.scheduleId}_$stamp',
+            type: NotificationType.scheduleRescheduled,
+            title: 'Garbage collection rescheduled',
+            message: _withNotes(
+              'Your collection has been moved from ${_when(current.collectionDate)} to ${_when(collectionDate)}.',
+              notes,
+            ),
+            scheduleId: current.scheduleId,
+          ),
+        );
+      } else if (notesChanged) {
+        _notices.addNotices(
+          batch.set,
+          recipients: recipients,
+          officeId: current.officeId,
+          notice: OfficeNotice(
+            key: 'updated_${current.scheduleId}_$stamp',
+            type: NotificationType.scheduleUpdated,
+            title: 'Collection instructions updated',
+            message: _withNotes(
+              'The Collector updated the instructions for your collection on ${_when(collectionDate)}.',
+              notes,
+            ),
+            scheduleId: current.scheduleId,
+          ),
+        );
+      }
+      await batch.commit();
     } catch (e) {
       throw AppException.from(e);
     }
@@ -237,7 +299,9 @@ class ScheduleRepository {
     required String reason,
   }) async {
     try {
-      await _schedules.doc(current.scheduleId).update({
+      final recipients = await _notices.officeRecipients(current.officeId);
+      final batch = _db.batch();
+      batch.update(_schedules.doc(current.scheduleId), {
         'collectionDate': Timestamp.fromDate(collectionDate),
         'collectionTime': collectionTime,
         'previousCollectionDate': Timestamp.fromDate(current.collectionDate),
@@ -246,19 +310,49 @@ class ScheduleRepository {
         'reminderSent': false,
         'updatedAt': FieldValue.serverTimestamp(),
       });
+      _notices.addNotices(
+        batch.set,
+        recipients: recipients,
+        officeId: current.officeId,
+        notice: OfficeNotice(
+          key: 'rescheduled_${current.scheduleId}_${DateTime.now().millisecondsSinceEpoch}',
+          type: NotificationType.scheduleRescheduled,
+          title: 'Garbage collection rescheduled',
+          message: 'Your collection has been moved from ${_when(current.collectionDate)} '
+              'to ${_when(collectionDate)}. Reason: ${reason.trim()}',
+          scheduleId: current.scheduleId,
+        ),
+      );
+      await batch.commit();
     } catch (e) {
       throw AppException.from(e);
     }
   }
 
-  Future<void> cancel(String scheduleId, {required String reason}) async {
+  Future<void> cancel(Schedule current, {required String reason}) async {
     try {
-      await _schedules.doc(scheduleId).update({
+      final recipients = await _notices.officeRecipients(current.officeId);
+      final batch = _db.batch();
+      batch.update(_schedules.doc(current.scheduleId), {
         'status': ScheduleStatus.cancelled.value,
         'statusNote': reason.trim(),
         'cancelledAt': FieldValue.serverTimestamp(),
         'updatedAt': FieldValue.serverTimestamp(),
       });
+      _notices.addNotices(
+        batch.set,
+        recipients: recipients,
+        officeId: current.officeId,
+        notice: OfficeNotice(
+          key: 'cancelled_${current.scheduleId}',
+          type: NotificationType.scheduleCancelled,
+          title: 'Garbage collection cancelled',
+          message: 'The collection scheduled for ${_when(current.collectionDate)} has been cancelled. '
+              'Reason: ${reason.trim()}',
+          scheduleId: current.scheduleId,
+        ),
+      );
+      await batch.commit();
     } catch (e) {
       throw AppException.from(e);
     }
@@ -274,8 +368,67 @@ class ScheduleRepository {
       throw AppException.from(e);
     }
   }
+
+  /// Sends reminders for pending collections due within the next 24 hours
+  /// and marks them `upcoming`, once per schedule. Runs whenever the
+  /// Collector opens the app (on Blaze the optional scheduled function also
+  /// runs it every 30 minutes). Returns how many reminders were sent.
+  Future<int> sendDueReminders() async {
+    final now = DateTime.now();
+    final due = await _schedules
+        .where('status', whereIn: [ScheduleStatus.scheduled.value, ScheduleStatus.rescheduled.value])
+        .where('collectionDate', isGreaterThanOrEqualTo: Timestamp.fromDate(now))
+        // A few minutes of margin for clock differences with the server.
+        .where('collectionDate', isLessThanOrEqualTo: Timestamp.fromDate(now.add(const Duration(hours: 23, minutes: 50))))
+        .get();
+    var sent = 0;
+    for (final doc in due.docs) {
+      if (doc.data()['reminderSent'] == true) continue;
+      try {
+        final officeId = doc.data()['officeId'] as String;
+        final recipients = await _notices.officeRecipients(officeId);
+        final didSend = await _db.runTransaction<bool>((tx) async {
+          final snap = await tx.get(doc.reference);
+          final data = snap.data();
+          if (data == null || data['reminderSent'] == true) return false;
+          final fresh = Schedule.fromDoc(snap);
+          if (fresh.status != ScheduleStatus.scheduled && fresh.status != ScheduleStatus.rescheduled) {
+            return false;
+          }
+          tx.update(doc.reference, {
+            'status': ScheduleStatus.upcoming.value,
+            'reminderSent': true,
+            'reminderSentAt': FieldValue.serverTimestamp(),
+            'updatedAt': FieldValue.serverTimestamp(),
+          });
+          _notices.addNotices(
+            tx.set,
+            recipients: recipients,
+            officeId: fresh.officeId,
+            notice: OfficeNotice(
+              // Same id format as the optional Blaze reminder function.
+              key: 'reminder_${fresh.scheduleId}_${fresh.collectionDate.millisecondsSinceEpoch}',
+              type: NotificationType.scheduleReminder,
+              title: 'Upcoming garbage collection',
+              message: _withNotes(
+                'Reminder: your garbage collection is on ${_when(fresh.collectionDate)}. '
+                'Please have your waste properly segregated.',
+                fresh.notes,
+              ),
+              scheduleId: fresh.scheduleId,
+            ),
+          );
+          return true;
+        });
+        if (didSend) sent++;
+      } catch (e) {
+        debugPrint('Reminder for ${doc.id} skipped: $e');
+      }
+    }
+    return sent;
+  }
 }
 
 final scheduleRepositoryProvider = Provider<ScheduleRepository>(
-  (ref) => ScheduleRepository(ref.watch(firestoreProvider)),
+  (ref) => ScheduleRepository(ref.watch(firestoreProvider), ref.watch(notificationRepositoryProvider)),
 );

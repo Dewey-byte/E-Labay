@@ -3,13 +3,13 @@
   "private": true,
   "description": "Firebase CLI, emulator and security-rules test tooling for E-Labay (the app itself is Flutter).",
   "scripts": {
-    "emulators": "npm --prefix functions run build && firebase emulators:start --project demo-elabay",
+    "emulators": "firebase emulators:start --only auth,firestore,storage",
     "seed": "node tests/seed/seed-emulators.mjs",
     "test:rules": "firebase emulators:exec --only firestore,storage --project demo-elabay \"node --test tests/rules\"",
-    "test:integration": "npm --prefix functions run build && firebase emulators:exec --only auth,firestore,functions,storage --project demo-elabay \"node --test tests/integration\"",
-    "test": "npm --prefix functions test && npm run test:rules && npm run test:integration",
-    "deploy": "firebase deploy --only firestore,storage,functions",
-    "deploy:rules": "firebase deploy --only firestore:rules,firestore:indexes,storage"
+    "test:app": "firebase emulators:exec --only auth,firestore,storage \"node tests/seed/seed-emulators.mjs --minimal && flutter test integration_test -d emulator-5554 --dart-define=USE_FIREBASE_EMULATORS=true\"",
+    "test": "npm run test:rules",
+    "deploy": "firebase deploy --only firestore",
+    "deploy:blaze": "npm --prefix functions run build && firebase deploy --only firestore,storage,functions"
   },
   "devDependencies": {
     "@firebase/rules-unit-testing": "^5.0.2",

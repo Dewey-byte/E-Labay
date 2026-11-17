@@ -1,4 +1,3 @@
-import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
 /// A user-presentable error. Use [AppException.from] to translate Firebase
@@ -15,7 +14,6 @@ class AppException implements Exception {
   static AppException from(Object error) {
     if (error is AppException) return error;
     if (error is FirebaseAuthException) return _auth(error);
-    if (error is FirebaseFunctionsException) return _functions(error);
     if (error is FirebaseException) return _firebase(error);
     if (error is FormatException) return AppException(error.message);
     return const AppException('Something went wrong. Please try again.');
@@ -25,6 +23,8 @@ class AppException implements Exception {
 
   static AppException _auth(FirebaseAuthException e) {
     switch (e.code) {
+      case 'email-already-in-use':
+        return AppException('An account with this email already exists.', code: e.code);
       case 'invalid-email':
         return AppException('That email address is not valid.', code: e.code);
       case 'user-disabled':
@@ -56,31 +56,6 @@ class AppException implements Exception {
     }
   }
 
-  static AppException _functions(FirebaseFunctionsException e) {
-    switch (e.code) {
-      case 'unavailable':
-      case 'deadline-exceeded':
-        return AppException(
-          'The server could not be reached. Check your connection and try again.',
-          code: e.code,
-        );
-      case 'unauthenticated':
-        return AppException('Your session has expired. Please sign in again.', code: e.code);
-      case 'permission-denied':
-        return AppException(
-          e.message ?? 'You do not have permission to do that.',
-          code: e.code,
-        );
-      case 'not-found':
-        return AppException(
-          e.message ??
-              'The requested service was not found. Make sure the Cloud Functions are deployed.',
-          code: e.code,
-        );
-      default:
-        return AppException(e.message ?? 'The request failed.', code: e.code);
-    }
-  }
 
   static AppException _firebase(FirebaseException e) {
     switch (e.code) {
