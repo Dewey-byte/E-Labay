@@ -147,6 +147,16 @@ void main() {
         await pumpScreen(tester, const CollectorDashboardScreen(), collector, entry.value);
         expect(find.text('Maria Santos'), findsWidgets);
         expect(find.text('Collection statistics'), findsOneWidget);
+        await tester.scrollUntilVisible(find.text("Registrar's Office"), 300, scrollable: find.byType(Scrollable).first);
+        expect(find.text('Campus leaderboard'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      });
+
+      testWidgets('Leaderboard for the Collector (no own-office highlight)', (tester) async {
+        await pumpScreen(tester, const LeaderboardScreen(), collector, entry.value);
+        expect(find.text('Campus leaderboard'), findsOneWidget);
+        expect(find.text('Your office'), findsNothing);
+        expect(find.text('You'), findsNothing);
         expect(tester.takeException(), isNull);
       });
 

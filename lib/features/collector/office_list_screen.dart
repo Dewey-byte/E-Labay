@@ -59,7 +59,16 @@ class _OfficeListScreenState extends ConsumerState<OfficeListScreen> {
   Widget build(BuildContext context) {
     final offices = ref.watch(officesProvider);
     return Scaffold(
-      appBar: AppBar(title: const Text('Faculty offices')),
+      appBar: AppBar(
+        title: const Text('Faculty offices'),
+        actions: [
+          IconButton(
+            tooltip: 'Campus leaderboard',
+            icon: const Icon(Icons.leaderboard_outlined),
+            onPressed: () => context.push(AppRoutes.collectorLeaderboard),
+          ),
+        ],
+      ),
       floatingActionButton: FloatingActionButton.extended(
         heroTag: 'offices-add',
         onPressed: () => context.push(AppRoutes.collectorNewOffice),

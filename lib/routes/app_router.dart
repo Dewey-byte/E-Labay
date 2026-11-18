@@ -115,6 +115,7 @@ final routerProvider = Provider<GoRouter>((ref) {
         (s) => CollectionDetailsScreen(collectionId: s.pathParameters['id']!),
       ),
       page(AppRoutes.collectorSettings, (_) => const SettingsScreen()),
+      page(AppRoutes.collectorLeaderboard, (_) => const LeaderboardScreen()),
 
       // ---------------- Faculty Office ----------------
       StatefulShellRoute.indexedStack(

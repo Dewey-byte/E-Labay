@@ -7,6 +7,7 @@ import '../../core/utils/formatters.dart';
 import '../../models/schedule_model.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/collection_provider.dart';
+import '../../providers/leaderboard_provider.dart';
 import '../../providers/office_provider.dart';
 import '../../providers/schedule_provider.dart';
 import '../../repositories/schedule_repository.dart';
@@ -136,6 +137,13 @@ class CollectorDashboardScreen extends ConsumerWidget {
               ),
 
               SectionHeader(
+                title: 'Campus leaderboard',
+                actionLabel: 'Full ranking',
+                onAction: () => context.push(AppRoutes.collectorLeaderboard),
+              ),
+              const _LeaderboardPreview(),
+
+              SectionHeader(
                 title: 'Upcoming collections',
                 actionLabel: 'See all',
                 onAction: () => context.go(AppRoutes.collectorSchedules),
@@ -200,6 +208,76 @@ class CollectorDashboardScreen extends ConsumerWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Top three offices by points; tapping one opens its details.
+class _LeaderboardPreview extends ConsumerWidget {
+  const _LeaderboardPreview();
+
+  static const _medals = [AppColors.gold, AppColors.silver, AppColors.bronze];
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final board = ref.watch(leaderboardProvider);
+    final theme = Theme.of(context);
+    return AsyncValueView(
+      value: board,
+      compact: true,
+      onRetry: () => ref.invalidate(leaderboardProvider),
+      data: (list) {
+        if (list.isEmpty) {
+          return const AppCard(
+            child: EmptyState(
+              icon: Icons.leaderboard_outlined,
+              title: 'No offices ranked yet',
+              message: 'Rankings appear once offices are registered.',
+              compact: true,
+            ),
+          );
+        }
+        return AppCard(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: Column(
+            children: [
+              for (final entry in list.take(3))
+                ListTile(
+                  onTap: () => context.push(AppRoutes.collectorOffice(entry.office.officeId)),
+                  leading: SizedBox(
+                    width: 40,
+                    child: Icon(
+                      Icons.emoji_events,
+                      color: entry.rank <= 3 ? _medals[entry.rank - 1] : AppColors.textMuted,
+                    ),
+                  ),
+                  title: Text(
+                    entry.office.officeName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.titleSmall,
+                  ),
+                  subtitle: Text(
+                    '${Fmt.ordinal(entry.rank)} · ${Fmt.percent(entry.office.properSegregationRate)} proper',
+                    style: theme.textTheme.bodySmall,
+                  ),
+                  trailing: Text(
+                    Fmt.points(entry.office.totalPoints),
+                    style: theme.textTheme.titleSmall?.copyWith(color: AppColors.forestGreen),
+                  ),
+                ),
+              if (list.length > 3)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 2, 16, 8),
+                  child: Text(
+                    '${list.length - 3} more office${list.length - 3 == 1 ? '' : 's'} in the full ranking',
+                    style: theme.textTheme.labelSmall?.copyWith(color: AppColors.textMuted),
+                  ),
+                ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

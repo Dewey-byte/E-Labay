@@ -1,25 +1,33 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../core/theme/app_colors.dart';
 import '../../core/utils/formatters.dart';
 import '../../core/utils/ranking.dart';
 import '../../providers/auth_provider.dart';
 import '../../providers/leaderboard_provider.dart';
+import '../../routes/app_routes.dart';
 import '../../shared/widgets/app_card.dart';
 import '../../shared/widgets/initials_avatar.dart';
 import '../../shared/widgets/state_views.dart';
 import '../../shared/widgets/status_chip.dart';
 
 /// Campus-wide leaderboard ranked by accumulated points. Updates live.
+/// Faculty Offices see their own position highlighted; Collectors can open
+/// an office's details from its row.
 class LeaderboardScreen extends ConsumerWidget {
   const LeaderboardScreen({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final board = ref.watch(leaderboardProvider);
-    final myOfficeId = ref.watch(currentUserProvider)?.officeId;
+    final user = ref.watch(currentUserProvider);
+    final myOfficeId = user?.officeId;
     final mine = ref.watch(myRankProvider);
+    final isCollector = user?.isCollector ?? false;
+    void Function()? openOffice(String officeId) =>
+        isCollector ? () => context.push(AppRoutes.collectorOffice(officeId)) : null;
 
     return Scaffold(
       appBar: AppBar(title: const Text('Campus leaderboard')),
@@ -51,7 +59,11 @@ class LeaderboardScreen extends ConsumerWidget {
               ),
               const SizedBox(height: 10),
               for (final entry in list) ...[
-                _RankRow(entry: entry, highlight: entry.office.officeId == myOfficeId),
+                _RankRow(
+                  entry: entry,
+                  highlight: entry.office.officeId == myOfficeId,
+                  onTap: openOffice(entry.office.officeId),
+                ),
                 const SizedBox(height: 8),
               ],
             ],
@@ -215,16 +227,18 @@ class _PodiumColumn extends StatelessWidget {
 }
 
 class _RankRow extends StatelessWidget {
-  const _RankRow({required this.entry, required this.highlight});
+  const _RankRow({required this.entry, required this.highlight, this.onTap});
 
   final RankedOffice entry;
   final bool highlight;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final o = entry.office;
     return AppCard(
+      onTap: onTap,
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       color: highlight ? AppColors.mintSurface : null,
       borderColor: highlight ? AppColors.forestGreen : null,

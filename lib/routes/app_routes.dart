@@ -18,6 +18,7 @@ class AppRoutes {
   static const collectorNewSchedule = '/collector/new-schedule';
   static const collectorNewOffice = '/collector/new-office';
   static const collectorSettings = '/collector/settings';
+  static const collectorLeaderboard = '/collector/leaderboard';
   static String collectorSchedule(String id) => '/collector/schedule/$id';
   static String collectorEditSchedule(String id) => '/collector/schedule/$id/edit';
   static String collectorAssess(String id) => '/collector/schedule/$id/assess';
