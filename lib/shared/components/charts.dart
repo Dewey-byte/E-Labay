@@ -253,6 +253,8 @@ class PointsTrendChart extends StatelessWidget {
               }
               return SideTitleWidget(
                 meta: meta,
+                // keep the first and last dates inside the chart instead of clipping them
+                fitInside: SideTitleFitInsideData.fromTitleMeta(meta, distanceFromEdge: 0),
                 child: Text(Fmt.monthDay(sorted[i].effectiveDate), style: _axisStyle),
               );
             },

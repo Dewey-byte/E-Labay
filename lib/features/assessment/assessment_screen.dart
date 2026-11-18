@@ -558,11 +558,13 @@ class _ReviewSheet extends StatelessWidget {
               Text('Remarks', style: theme.textTheme.labelLarge),
               Text(remarks),
             ],
-            const SizedBox(height: 8),
-            Text(
-              '$photoCount evidence photo${photoCount == 1 ? '' : 's'} attached',
-              style: theme.textTheme.bodySmall,
-            ),
+            if (FeatureFlags.photoUploads) ...[
+              const SizedBox(height: 8),
+              Text(
+                '$photoCount evidence photo${photoCount == 1 ? '' : 's'} attached',
+                style: theme.textTheme.bodySmall,
+              ),
+            ],
             const SizedBox(height: 16),
             Container(
               padding: const EdgeInsets.all(12),
